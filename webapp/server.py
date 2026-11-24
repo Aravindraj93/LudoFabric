@@ -70,6 +70,29 @@ class Settings(BaseModel):
     sketchfab_token: str | None = None
     codex_reasoning: str | None = None
     polish_rounds: int | None = None
+    model_orchestrator: str | None = None
+    model_coder: str | None = None
+    model_vision: str | None = None
+
+
+MODEL_FIELDS = ("model_orchestrator", "model_coder", "model_vision")
+
+
+def provider_models(pid: str) -> dict:
+    path = STUDIO_DIR / "models.json"
+    saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if pid in saved:
+        return saved[pid]
+    cfg = Config()
+    return {field: getattr(cfg, field) if pid == cfg.llm_backend else "" for field in MODEL_FIELDS}
+
+
+def apply_models(cfg: Config, pid: str, overrides: dict | None = None, model: str | None = None) -> None:
+    values = provider_models(pid)
+    for field in MODEL_FIELDS:
+        value = (overrides or {}).get(field)
+        setattr(cfg, field, model.strip() if model is not None else
+                (value.strip() if value is not None else values.get(field, "")))
 
 
 @app.get("/api/settings")
@@ -80,6 +103,7 @@ def get_settings():
         "unity_ok": bool(cfg.unity_editor) and Path(cfg.unity_editor).exists(),
         "projects_root": str(projects_root()), "sketchfab_token_set": bool(cfg.sketchfab_token),
         "codex_reasoning": cfg.codex_reasoning, "polish_rounds": cfg.polish_rounds,
+        "models": provider_models(cfg.llm_backend),
         "unity_candidates": sorted(glob.glob(r"C:\Program Files\Unity\Hub\Editor\*\Editor\Unity.exe")
                                    + glob.glob(r"C:\Program Files\Unity*\Editor\Unity.exe"), reverse=True),
     }
@@ -87,6 +111,15 @@ def get_settings():
 
 @app.post("/api/settings")
 def post_settings(s: Settings):
+    pid = s.llm_backend or Config().llm_backend
+    selected = provider_models(pid)
+    for field in MODEL_FIELDS:
+        if getattr(s, field) is not None:
+            selected[field] = getattr(s, field).strip()
+    models_path = STUDIO_DIR / "models.json"
+    saved = json.loads(models_path.read_text(encoding="utf-8")) if models_path.exists() else {}
+    saved[pid] = selected
+    atomic_json(models_path, saved)
     mapping = {"llm_backend": "LLM_BACKEND", "unity_editor": "UNITY_EDITOR", "projects_root": "PROJECTS_ROOT",
                "sketchfab_token": "SKETCHFAB_API_TOKEN", "codex_reasoning": "CODEX_REASONING_EFFORT",
                "polish_rounds": "POLISH_ROUNDS"}
@@ -100,7 +133,37 @@ def post_settings(s: Settings):
 # ----------------------------------------------------------------------------- providers
 @app.get("/api/providers")
 def providers():
-    return [p.info() for p in PROVIDERS.values()]
+    return [p.info() for p in PROVIDERS.values()] + [api_provider_info(pid) for pid in ("openai", "chat")]
+
+
+def api_provider_info(pid: str) -> dict:
+    return {"id": pid, "name": "OpenAI API" if pid == "openai" else "OpenAI-compatible API",
+            "installed": True, "logged_in": None, "api": True,
+            "plan": "Configure API key / endpoint in .env; API billing is separate from CLI subscriptions.",
+            "can_logout": False}
+
+
+@app.get("/api/providers/{pid}/models")
+def model_choices(pid: str):
+    if pid not in PROVIDERS and pid not in ("openai", "chat"):
+        raise HTTPException(400, "unknown provider")
+    choices = []
+    if pid == "codex":
+        cache = Path(os.getenv("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json"
+        try:
+            data = json.loads(cache.read_text(encoding="utf-8"))
+            choices = [{"id": m["slug"], "label": m.get("display_name") or m["slug"]}
+                       for m in data.get("models", []) if m.get("slug") and
+                       m.get("visibility", "list") != "hide" and "auto-review" not in m["slug"]]
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+    return {"models": choices, "selected": provider_models(pid),
+            "note": "Suggestions may be stale or belong to another CLI surface. Test a model to check account access. "
+                    "Enter any supported model ID, or leave blank for the provider default."}
+
+
+class ModelTest(BaseModel):
+    model: str = ""
 
 
 def _provider(pid: str):
@@ -136,20 +199,22 @@ def logout(pid: str):
 
 
 @app.post("/api/providers/{pid}/test")
-def test(pid: str):
+def test(pid: str, body: ModelTest | None = None):
     from gameagent.llm import LLM
-    p = _provider(pid)
+    p = _provider(pid) if pid not in ("openai", "chat") else None
     cfg = Config()
     cfg.llm_backend = pid
+    apply_models(cfg, pid)
     try:
         llm = LLM(cfg)
         t0 = time.time()
-        out = llm.complete(model="", instructions="You are a connectivity test.",
+        out = llm.complete(model=body.model.strip() if body else "", instructions="You are a connectivity test.",
                            prompt="Reply with exactly: GAMEAGENT_OK", name=f"test_{pid}", retries=1)
         ok = "GAMEAGENT_OK" in out
-        return {"ok": ok, "seconds": round(time.time() - t0), "output": out[:300], "provider": p.info()}
+        return {"ok": ok, "seconds": round(time.time() - t0), "output": out[:300],
+                "provider": p.info() if p else api_provider_info(pid)}
     except BaseException as exc:  # FatalLLMError is a SystemExit
-        return {"ok": False, "output": str(exc)[:800], "provider": p.info()}
+        return {"ok": False, "output": str(exc)[:800], "provider": p.info() if p else api_provider_info(pid)}
 
 
 # ----------------------------------------------------------------------------- jobs
@@ -158,6 +223,10 @@ class JobRequest(BaseModel):
     project: str | None = None
     provider: str = "codex"
     mode: str = "design"  # design | build
+    model: str | None = None
+    model_orchestrator: str | None = None
+    model_coder: str | None = None
+    model_vision: str | None = None
 
 
 class JobRunner:
@@ -181,9 +250,16 @@ class JobRunner:
         return bool(self.thread and self.thread.is_alive())
 
     def start(self, job: JobRequest, project_path: Path) -> None:
+        cfg = Config()
+        apply_models(cfg, job.provider, job.model_dump(), job.model)
+        # Resolve configuration now so settings changed during execution cannot alter this job.
+        for field in MODEL_FIELDS:
+            setattr(job, field, getattr(cfg, field))
+        job.model = None
         self.status = {"running": True, "project": project_path.name, "mode": job.mode, "error": None,
                        "started": time.time(), "provider": job.provider, "project_path": str(project_path),
                        "state": "running"}
+        self.status["models"] = {field: getattr(job, field) for field in MODEL_FIELDS}
         self.persist()
         self.thread = threading.Thread(target=self._run, args=(job, project_path), daemon=True)
         self.thread.start()
@@ -193,6 +269,7 @@ class JobRunner:
         try:
             cfg = Config()
             cfg.llm_backend = job.provider
+            apply_models(cfg, job.provider, job.model_dump(), job.model)
             cfg.validate(need_unity=(job.mode == "build"))
             orch = Orchestrator(cfg, project_path)
             orch.run(job.request, stop_after="planned" if job.mode == "design" else None)

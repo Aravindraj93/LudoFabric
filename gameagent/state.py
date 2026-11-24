@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -20,9 +21,23 @@ def atomic_json(path: Path, value: dict) -> None:
             json.dump(value, stream, indent=2, ensure_ascii=False)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(tmp, path)
+        for attempt in range(7):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError as exc:
+                if attempt == 6:
+                    # Do not truncate a valid checkpoint or discard the new one on a persistent lock.
+                    recovery = tmp
+                    tmp = None
+                    raise PermissionError(
+                        f"Cannot replace checkpoint {path}. Close programs holding this file and check folder "
+                        f"permissions. Previous checkpoint is intact; new data preserved at {recovery}."
+                    ) from exc
+                time.sleep(min(0.05 * 2 ** attempt, 0.8))
     finally:
-        Path(tmp).unlink(missing_ok=True)
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
 
 
 class State(BaseModel):

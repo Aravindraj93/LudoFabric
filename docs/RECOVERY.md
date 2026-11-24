@@ -1,5 +1,11 @@
 # Recovering interrupted jobs
 
+On Windows, a dashboard reader, antivirus scanner, or other process can briefly lock a checkpoint
+against replacement. Writes retry for a short bounded interval. If replacement stays blocked,
+the old checkpoint remains intact and the new JSON is preserved in a `.tmp` file whose path appears
+in the error. Close the program holding the file and check write/delete permissions before resuming.
+Do not replace a checkpoint from a temporary file without first checking which version is newer.
+
 
 Progress belongs to the project, not an AI chat session. Keep both folders together:
 

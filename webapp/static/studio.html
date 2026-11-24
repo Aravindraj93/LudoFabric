@@ -347,6 +347,8 @@ footer span{color:#cfd3ff}
       <textarea id="prompt" spellcheck="false"></textarea>
       <div class="controls">
         <div class="field"><label>AI brain</label><select id="provider"></select></div>
+        <div class="field"><label>Model override (all roles, this job)</label><input id="jobModel" list="modelList" placeholder="default / saved role models"></div>
+        <button class="btn sm" onclick="testModel('jobModel',this)">Test model override</button>
         <div class="field"><label>Project name</label><input id="pname" placeholder="auto from description"></div>
         <button class="btn" data-job onclick="startJob('design')">&#10022; Design &amp; plan</button>
         <button class="btn primary" data-job onclick="startJob('build')">&#9654; Build the full game</button>
@@ -409,6 +411,18 @@ footer span{color:#cfd3ff}
           <div><label class="flabel">Reasoning effort</label><select id="effort"><option value="">default</option><option>low</option><option>medium</option><option>high</option></select></div>
           <div><label class="flabel">Visual polish rounds</label><select id="polish"><option>0</option><option>1</option><option>2</option><option>3</option></select></div>
         </div>
+        <h3 style="margin-top:22px">Models for the selected AI provider</h3>
+        <datalist id="modelList"></datalist>
+        <label class="flabel" for="modelOrchestrator">Design and planning model</label>
+        <input id="modelOrchestrator" list="modelList" placeholder="provider default">
+        <button class="btn sm" onclick="testModel('modelOrchestrator',this)">Test design model</button>
+        <label class="flabel" for="modelCoder">Coding model</label>
+        <input id="modelCoder" list="modelList" placeholder="provider default">
+        <button class="btn sm" onclick="testModel('modelCoder',this)">Test coding model</button>
+        <label class="flabel" for="modelVision">Screenshot review model</label>
+        <input id="modelVision" list="modelList" placeholder="provider default; requires image support">
+        <button class="btn sm" onclick="testModel('modelVision',this)">Test review model</button>
+        <div id="modelNote" class="hint" style="margin-top:10px"></div>
         <div style="margin-top:16px"><button class="btn sm" onclick="saveSettings()">Save settings</button></div>
       </div>
     </div>
@@ -735,6 +749,32 @@ function connectLog() {
 
 /* ===== Providers & settings ===== */
 let settings = {}, providerList = [];
+let modelProvider = null;
+async function loadModelChoices(force = false) {
+  const pid = $("provider").value;
+  if (!pid || (!force && modelProvider === pid)) return;
+  try {
+    const data = await api(`/api/providers/${pid}/models`);
+    if ($("provider").value !== pid) return;
+    modelProvider = pid;
+    $("modelList").innerHTML = data.models.map(m => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join("");
+    $("modelOrchestrator").value = data.selected.model_orchestrator || "";
+    $("modelCoder").value = data.selected.model_coder || "";
+    $("modelVision").value = data.selected.model_vision || "";
+    $("jobModel").value = "";
+    $("modelNote").textContent = `${pid}: ${data.note} Tests check text access, not image capability or game quality.`;
+  } catch (e) { $("modelNote").textContent = e.message; }
+}
+$("provider").addEventListener("change", () => loadModelChoices(true));
+async function testModel(field, btn) {
+  btn.disabled = true;
+  try {
+    const pid = $("provider").value;
+    const r = await api(`/api/providers/${pid}/test`, {method:"POST", body:JSON.stringify({model:$(field).value.trim()})});
+    toast(r.ok ? "Selected model is accessible" : "Model test failed: " + r.output, r.ok ? "ok" : "bad");
+  } catch (e) { toast(e.message, "bad"); }
+  finally { btn.disabled = false; }
+}
 const PCOL = {codex: ["#10a37f", "#0b6b55", "AI"], claude: ["#d97757", "#9c4a2f", "C"], gemini: ["#4285f4", "#a142f4", "G"], qwen: ["#615ced", "#2f2a9c", "Q"]};
 async function loadProviders() {
   providerList = await api("/api/providers");
@@ -742,7 +782,7 @@ async function loadProviders() {
     const st = !p.installed ? '<span class="pill bad">not installed</span>' : p.logged_in === true ? '<span class="pill ok">signed in</span>'
       : p.logged_in === false ? '<span class="pill bad">signed out</span>' : '<span class="pill warn">unknown, run Test</span>';
     const [a, b, l] = PCOL[p.id] || ["#555", "#333", "?"];
-    const acts = !p.installed
+    const acts = p.api ? `<button class="btn sm" onclick="provAct('${p.id}','test',this)">Test</button>` : !p.installed
       ? `<button class="btn sm" onclick="provAct('${p.id}','install',this)">Install</button>`
       : p.logged_in === true
         ? `<button class="btn sm" onclick="provAct('${p.id}','test',this)">Test</button>` +
@@ -758,6 +798,7 @@ async function loadProviders() {
   const sel = $("provider"), cur = sel.value || settings.llm_backend || "codex";
   sel.innerHTML = providerList.map(p => `<option value="${p.id}" ${p.installed ? "" : "disabled"}>${esc(p.name)}${p.installed ? "" : " (install in Setup)"}</option>`).join("");
   sel.value = providerList.some(p => p.id === cur && p.installed) ? cur : ((providerList.find(p => p.installed) || {}).id || "codex");
+  await loadModelChoices();
   updateBanner();
 }
 async function provAct(id, action, btn) {
@@ -794,7 +835,9 @@ function updateBanner() {
 }
 async function saveSettings() {
   const body = {unity_editor: $("unity").value, projects_root: $("root").value, codex_reasoning: $("effort").value,
-                polish_rounds: +$("polish").value, llm_backend: $("provider").value};
+                polish_rounds: +$("polish").value, llm_backend: $("provider").value,
+                model_orchestrator:$("modelOrchestrator").value.trim(), model_coder:$("modelCoder").value.trim(),
+                model_vision:$("modelVision").value.trim()};
   if ($("sketch").value) body.sketchfab_token = $("sketch").value;
   try { await api("/api/settings", {method: "POST", body: JSON.stringify(body)}); $("sketch").value = ""; await loadSettings(); toast("Settings saved", "ok"); }
   catch (e) { toast(e.message, "bad"); }
@@ -818,7 +861,9 @@ async function startJob(mode, project = null) {
   if (mode === "build" && !settings.unity_ok) { toast("Set a valid Unity.exe path in Setup first.", "bad"); location.hash = "#setup"; return; }
   try {
     const r = await api("/api/jobs", {method: "POST", body: JSON.stringify({request, project: project || $("pname").value.trim() || null,
-      provider: $("provider").value, mode})});
+      provider: $("provider").value, mode, model:$("jobModel").value.trim() || null,
+      model_orchestrator:$("modelOrchestrator").value.trim(), model_coder:$("modelCoder").value.trim(),
+      model_vision:$("modelVision").value.trim()})});
     selected = r.project; detailKey = ""; liveRunning = true; setStage(0, 0);
     toast(mode === "design" ? `Designing "${r.project}"...` : `Building "${r.project}"...`, "ok");
     $("studio").scrollIntoView({behavior: "smooth"});

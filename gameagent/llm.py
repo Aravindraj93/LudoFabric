@@ -87,7 +87,7 @@ class _ChatCompletions:
                              timeout=900, max_retries=0)
 
     def call(self, model: str, instructions: str, prompt: str, images: list[Path], json_mode: bool) -> str:
-        from openai import AuthenticationError, NotFoundError, PermissionDeniedError
+        from openai import AuthenticationError, BadRequestError, NotFoundError, PermissionDeniedError
         user: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for img in images:
             b64 = base64.b64encode(Path(img).read_bytes()).decode()
@@ -98,7 +98,7 @@ class _ChatCompletions:
             kwargs["response_format"] = {"type": "json_object"}
         try:
             resp = self.client.chat.completions.create(**kwargs)
-        except (AuthenticationError, PermissionDeniedError, NotFoundError) as exc:
+        except (AuthenticationError, PermissionDeniedError, NotFoundError, BadRequestError) as exc:
             raise FatalLLMError(f"LLM request rejected ({exc.__class__.__name__}): {exc}")
         return resp.choices[0].message.content or ""
 
@@ -202,6 +202,9 @@ class _AgentCLI:
         err = (proc.stderr or "")[-1500:]
         if proc.returncode != 0 or not out:
             low = (err + out).lower()
+            if re.search(r'model_not_found|unknown model|invalid model|model .{0,100}(?:not supported|not found|not available)', low):
+                raise FatalLLMError(f"{self.provider.name} rejected the selected model. Choose a model available "
+                                    f"to this account and test it in Setup.\n{(err or out)[-1500:]}")
             if any(s in low for s in ("login", "authenticat", "unauthorized", "oauth")) and "limit" not in low:
                 raise FatalLLMError(f"{self.provider.name} is not logged in. Log in from the dashboard or run "
                                     f"'{self.provider.bin}' once in a terminal.\n{err[-400:]}")

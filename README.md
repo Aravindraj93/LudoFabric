@@ -202,7 +202,17 @@ Selected prompts, project context, and screenshots go to your chosen provider. L
 may contain private code and prompts; review them before sharing. LudoFabric is not affiliated with
 Unity or these AI providers.
 
-See [`.env.example`](.env.example) for model selection, context budget, polish rounds, timeouts,
+In the dashboard, choose an AI provider and enter a **Model override** for all roles in one job.
+Under **Setup → Models**, optionally choose separate design/planning, coding, and screenshot-review
+models. Save settings to retain these choices separately for each provider. **Test** checks the exact
+entered model through that provider's login or API configuration; it does not verify image support
+or Unity code quality. Leave a field empty to use the provider default.
+
+Codex suggestions come from its local model cache and may be stale or belong to another surface.
+All providers accept custom model IDs; a suggestion is not a guarantee of subscription access.
+Use an image-capable model for screenshot review, or set visual polish rounds to zero.
+
+See [`.env.example`](.env.example) for CLI model selection, context budget, polish rounds, timeouts,
 asset settings, and quota-pause behavior.
 
 ## Project status
@@ -210,7 +220,7 @@ asset settings, and quota-pause behavior.
 **Available:** local web dashboard, CLI, saved-project recovery, Unity bridge, package setup, task
 generation, repair/polish loops, and a Windows player build path.
 
-**Verified so far:** 14 automated recovery/setup regression tests, a live Codex connectivity check,
+**Verified so far:** 20 automated recovery/setup/model-selection regression tests, a live Codex connectivity check,
 and Unity setup plus bridge compilation on 6000.5.0f1. These checks do not establish reliable
 end-to-end generation for every game or provider.
 
