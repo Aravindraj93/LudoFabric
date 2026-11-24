@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-labelledby="title desc">
+  <title id="title">LudoFabric</title>
+  <desc id="desc">Weave an idea into a playable Unity game. An open-source AI game studio.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#080c20"/><stop offset="1" stop-color="#17102d"/></linearGradient>
+    <linearGradient id="accent"><stop stop-color="#a98aff"/><stop offset=".55" stop-color="#62ddff"/><stop offset="1" stop-color="#ed82c7"/></linearGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse"><path d="M36 0H0V36" fill="none" stroke="#9ca8f1" stroke-opacity=".07"/></pattern>
+  </defs>
+  <rect width="1280" height="400" rx="24" fill="url(#bg)"/>
+  <rect width="1280" height="400" rx="24" fill="url(#grid)"/>
+  <circle cx="1080" cy="150" r="165" fill="#6946b3" opacity=".1"/>
+  <circle cx="980" cy="270" r="120" fill="#39bfff" opacity=".05"/>
+  <g fill="none" stroke="url(#accent)" stroke-width="3" opacity=".65">
+    <path d="M880 95l100 57 100-57 100 57v115l-100 57-100-57-100 57V95Z"/>
+    <path d="M880 210l100-58 100 58 100-58M980 152v115m100-172v229M880 95l200 115-100 57m-100-57 100 57"/>
+  </g>
+  <g fill="#9feaff"><circle cx="980" cy="152" r="6"/><circle cx="1080" cy="210" r="6"/><circle cx="980" cy="267" r="6"/></g>
+  <text x="72" y="86" fill="#b9b1e3" font-family="Segoe UI,Arial,sans-serif" font-size="14" letter-spacing="5">OPEN SOURCE / UNITY / AI</text>
+  <text x="66" y="183" fill="url(#accent)" font-family="Segoe UI,Arial,sans-serif" font-size="88" font-weight="750" letter-spacing="-4">LudoFabric</text>
+  <text x="72" y="241" fill="#f1f0ff" font-family="Segoe UI,Arial,sans-serif" font-size="25">Weave an idea into a playable Unity game.</text>
+  <text x="72" y="280" fill="#a9afca" font-family="Segoe UI,Arial,sans-serif" font-size="18">Design. Generate. Build. Resume.</text>
+  <rect x="72" y="320" width="271" height="34" rx="17" fill="#a78bfa" fill-opacity=".09" stroke="#a78bfa" stroke-opacity=".35"/>
+  <text x="91" y="342" fill="#c9bcff" font-family="Segoe UI,Arial,sans-serif" font-size="13" letter-spacing="1">YOUR IDEA. YOUR LOCAL STUDIO.</text>
+</svg>
