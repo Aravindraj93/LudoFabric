@@ -844,7 +844,7 @@ async function saveSettings() {
 }
 
 /* ===== Jobs & projects ===== */
-let selected = null, wasRunning = false, detailKey = "";
+let selected = null, wasRunning = false, detailKey = "", startingJob = false;
 async function openProjectPath() {
   const path = window.prompt("Full Unity project folder path (keep its adjacent .agent folder):");
   if (!path) return;
@@ -856,10 +856,14 @@ async function openProjectPath() {
   } catch (e) { toast(e.message, "bad"); }
 }
 async function startJob(mode, project = null) {
+  if (startingJob) return;
   const request = project ? null : $("prompt").value.trim();
   if (!project && !request) { toast("Describe your game first ✍️", "bad"); $("prompt").focus(); return; }
   if (mode === "build" && !settings.unity_ok) { toast("Set a valid Unity.exe path in Setup first.", "bad"); location.hash = "#setup"; return; }
   try {
+    startingJob = true;
+    document.querySelectorAll("[data-job]").forEach(b => { b.disabled = true; });
+    toast("Checking selected model access before starting...", "ok");
     const r = await api("/api/jobs", {method: "POST", body: JSON.stringify({request, project: project || $("pname").value.trim() || null,
       provider: $("provider").value, mode, model:$("jobModel").value.trim() || null,
       model_orchestrator:$("modelOrchestrator").value.trim(), model_coder:$("modelCoder").value.trim(),
@@ -869,6 +873,7 @@ async function startJob(mode, project = null) {
     $("studio").scrollIntoView({behavior: "smooth"});
     pollJob();
   } catch (e) { toast(e.message, "bad"); }
+  finally { startingJob = false; pollJob(); }
 }
 async function pollJob() {
   let j; try { j = await api("/api/jobs/current"); } catch { syncOffice({running:false, offline:true}); $("navStatus").textContent = "server offline"; $("navOrb").className = "status-orb err"; return; }
@@ -885,7 +890,7 @@ async function pollJob() {
     : j.error ? `<span style="color:var(--bad)">Last job failed:</span> ${esc(j.error.split("\n")[0].slice(0, 140))}`
     : j.project ? `Finished <b>${esc(j.project)}</b>` : "idle, ready for your idea";
   $("navStatus").textContent = running ? `building ${j.project}...` : "studio ready";
-  document.querySelectorAll("[data-job]").forEach(b => { b.disabled = running; });
+  document.querySelectorAll("[data-job]").forEach(b => { b.disabled = running || startingJob; });
   if (wasRunning && !running) {
     if (j.error) toast("Job failed: " + j.error.split("\n")[0], "bad");
     else { toast(`✨ ${j.project} is ready`, "ok"); celebrate(); }

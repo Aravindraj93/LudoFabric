@@ -76,6 +76,25 @@ class Settings(BaseModel):
 
 
 MODEL_FIELDS = ("model_orchestrator", "model_coder", "model_vision")
+MODEL_ACCESS_TTL = 300
+_model_access: dict[tuple[str, str], float] = {}
+
+
+def rejected_models(pid: str) -> set[str]:
+    """Use explicit provider rejections, not assumptions about model names or capabilities."""
+    path = STUDIO_DIR / "rejected_models.json"
+    saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    rejected = set(saved.get(pid, []))
+    previous = STUDIO_DIR / "job.json"
+    if previous.exists():
+        job = json.loads(previous.read_text(encoding="utf-8"))
+        if job.get("provider") == pid:
+            match = re.search(r"The ['\"]([^'\"]+)['\"] model is not supported", job.get("error") or "")
+            if match:
+                rejected.add(match.group(1))
+                saved[pid] = sorted(rejected)
+                atomic_json(path, saved)
+    return rejected
 
 
 def provider_models(pid: str) -> dict:
@@ -157,6 +176,9 @@ def model_choices(pid: str):
                        m.get("visibility", "list") != "hide" and "auto-review" not in m["slug"]]
         except (OSError, ValueError, TypeError, KeyError):
             pass
+    rejected = rejected_models(pid)
+    choices = [m for m in choices if m["id"] not in rejected or
+               time.monotonic() - _model_access.get((pid, m["id"]), -MODEL_ACCESS_TTL) < MODEL_ACCESS_TTL]
     return {"models": choices, "selected": provider_models(pid),
             "note": "Suggestions may be stale or belong to another CLI surface. Test a model to check account access. "
                     "Enter any supported model ID, or leave blank for the provider default."}
@@ -211,6 +233,8 @@ def test(pid: str, body: ModelTest | None = None):
         out = llm.complete(model=body.model.strip() if body else "", instructions="You are a connectivity test.",
                            prompt="Reply with exactly: GAMEAGENT_OK", name=f"test_{pid}", retries=1)
         ok = "GAMEAGENT_OK" in out
+        if ok and body and body.model.strip():
+            _model_access[(pid, body.model.strip())] = time.monotonic()
         return {"ok": ok, "seconds": round(time.time() - t0), "output": out[:300],
                 "provider": p.info() if p else api_provider_info(pid)}
     except BaseException as exc:  # FatalLLMError is a SystemExit
@@ -291,6 +315,7 @@ class JobRunner:
 
 
 runner = JobRunner()
+_job_start_lock = threading.Lock()
 
 
 def slugify(text: str) -> str:
@@ -300,6 +325,15 @@ def slugify(text: str) -> str:
 
 @app.post("/api/jobs")
 def start_job(job: JobRequest):
+    if not _job_start_lock.acquire(blocking=False):
+        raise HTTPException(409, "Another job's models are being checked. Please wait.")
+    try:
+        return _start_job(job)
+    finally:
+        _job_start_lock.release()
+
+
+def _start_job(job: JobRequest):
     if runner.busy():
         raise HTTPException(409, "A job is already running (Unity allows one build at a time).")
     if job.provider not in PROVIDERS and job.provider not in ("openai", "chat"):
@@ -313,6 +347,17 @@ def start_job(job: JobRequest):
         saved = json.loads(state.read_text(encoding="utf-8"))
         if saved.get("request") and saved["request"] != job.request:
             raise HTTPException(409, "This project has a different saved request. Use Resume or choose a new project name.")
+    # Catch subscription/model mismatches before entering or modifying the game pipeline.
+    cfg = Config()
+    apply_models(cfg, job.provider, job.model_dump(), job.model)
+    for model in sorted({getattr(cfg, field) for field in MODEL_FIELDS} - {""}):
+        if time.monotonic() - _model_access.get((job.provider, model), -MODEL_ACCESS_TTL) < MODEL_ACCESS_TTL:
+            continue
+        result = test(job.provider, ModelTest(model=model))
+        if not result["ok"]:
+            raise HTTPException(400, f"Model '{model}' failed the access check. Your game progress is unchanged. "
+                                "Clear Model override and role fields for the default, or choose another model. "
+                                + result["output"][:600])
     runner.start(job, path)
     return {"ok": True, "project": name}
 

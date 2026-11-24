@@ -211,6 +211,10 @@ or Unity code quality. Leave a field empty to use the provider default.
 Codex suggestions come from its local model cache and may be stale or belong to another surface.
 All providers accept custom model IDs; a suggestion is not a guarantee of subscription access.
 Use an image-capable model for screenshot review, or set visual polish rounds to zero.
+Explicit model choices receive a minimal access check before a job starts, across all providers.
+Successful checks are reused for five minutes. These small requests use the selected provider's
+allowance; unavailable models are rejected before game tasks run. Known-rejected Codex models are
+removed from cache suggestions, but you can enter and retest an ID if account access changes.
 
 See [`.env.example`](.env.example) for CLI model selection, context budget, polish rounds, timeouts,
 asset settings, and quota-pause behavior.
@@ -220,7 +224,7 @@ asset settings, and quota-pause behavior.
 **Available:** local web dashboard, CLI, saved-project recovery, Unity bridge, package setup, task
 generation, repair/polish loops, and a Windows player build path.
 
-**Verified so far:** 20 automated recovery/setup/model-selection regression tests, a live Codex connectivity check,
+**Verified so far:** 24 automated recovery/setup/model-selection regression tests, a live Codex connectivity check,
 and Unity setup plus bridge compilation on 6000.5.0f1. These checks do not establish reliable
 end-to-end generation for every game or provider.
 

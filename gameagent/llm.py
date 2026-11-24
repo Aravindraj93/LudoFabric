@@ -38,6 +38,21 @@ class UsageLimitReached(FatalLLMError):
         self.retry_at = retry_at
 
 
+def _cli_error_summary(output: str) -> str:
+    """Extract the provider error without echoing the CLI's copy of the entire game prompt."""
+    for line in reversed(output.splitlines()):
+        if not line.startswith("ERROR:"):
+            continue
+        try:
+            payload = json.loads(line.partition(":")[2].strip())
+            error = payload.get("error", payload)
+            if isinstance(error, dict) and error.get("message"):
+                return str(error["message"])[:1500]
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return output.strip()[-1500:]
+
+
 def _extract_json(text: str) -> Any:
     text = text.strip()
     try:
@@ -138,13 +153,14 @@ class _CodexCLI:
         out_file.unlink(missing_ok=True)
         if proc.returncode != 0 or not answer.strip():
             err = (proc.stderr or "") + "\n" + (proc.stdout or "")
-            if "login" in err.lower() and ("not logged" in err.lower() or "unauthorized" in err.lower()):
+            diagnostic = _cli_error_summary(err)
+            if "login" in diagnostic.lower() and ("not logged" in diagnostic.lower() or "unauthorized" in diagnostic.lower()):
                 raise FatalLLMError("Codex CLI is not logged in. Run: codex login")
-            if LIMIT_PATTERNS.search(err):
-                raise _UsageLimit(err)
-            if re.search(r'model_not_found|model is not supported|invalid_request_error', err, re.I):
-                raise FatalLLMError("Codex rejected the model/request. Clear MODEL_ORCHESTRATOR, MODEL_CODER "
-                                    "and MODEL_VISION to use its default, or choose a supported model.\n" + err[-12000:])
+            if LIMIT_PATTERNS.search(diagnostic):
+                raise _UsageLimit(diagnostic)
+            if re.search(r'model_not_found|model .{0,100}(?:not supported|not found|not available)|invalid_request_error', diagnostic, re.I):
+                raise FatalLLMError(diagnostic + " Clear the job Model override and role model "
+                                    "fields to use the CLI default, or test another supported model in Setup.")
             if "unexpected argument '--ignore-user-config'" in err:
                 raise FatalLLMError("Update Codex CLI: this integration requires --ignore-user-config "
                                     "to isolate model and MCP settings.\n" + err[-2000:])
