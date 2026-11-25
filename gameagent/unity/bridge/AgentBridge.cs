@@ -100,6 +100,10 @@ namespace GameAgent.Bridge
         // ------------------------------------------------------------------
         public static void RunMethods()
         {
+            // TMP ships its fonts, settings and shaders in a unitypackage, not imported Assets.
+            // Import before observing builder errors so builders can safely create TMP UI headlessly.
+            try { EnsureTextMeshProResources(); }
+            catch (Exception e) { Errors.Add("TextMesh Pro resources: " + e); WriteResult(false); return; }
             Application.logMessageReceived += OnLog;
             bool ok = true;
             var list = (Arg("-agentMethods") ?? "").Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
@@ -135,6 +139,17 @@ namespace GameAgent.Bridge
             SyncBuildScenes();
             Application.logMessageReceived -= OnLog;
             WriteResult(ok);
+        }
+
+        static void EnsureTextMeshProResources()
+        {
+            const string settings = "Assets/TextMesh Pro/Resources/TMP Settings.asset";
+            const string font = "Assets/TextMesh Pro/Resources/Fonts & Materials/LiberationSans SDF.asset";
+            if (AssetDatabase.LoadMainAssetAtPath(settings) != null &&
+                AssetDatabase.LoadMainAssetAtPath(font) != null && Shader.Find("TextMeshPro/Distance Field") != null)
+                return;
+            throw new InvalidOperationException("TMP Essential Resources are missing or not imported. " +
+                "Run the project through UnityProject.run_builders so its resource installer runs first.");
         }
 
         static void SaveDirtyScenes()

@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import time
+import tarfile
 from pathlib import Path
 
 
@@ -167,9 +168,50 @@ class UnityProject:
         return self.runner.run(self._pp(), "compile", method="GameAgent.Bridge.AgentBridge.Ping")
 
     def run_builders(self, methods: list[str]) -> UnityResult:
+        self._install_tmp_resources()
         return self.runner.run(self._pp(), "builders", nographics=False,
                                method="GameAgent.Bridge.AgentBridge.RunMethods",
                                extra={"-agentMethods": ";".join(methods)})
+
+    def _install_tmp_resources(self) -> None:
+        """Install the Editor's trusted TMP archive before Unity starts (ImportPackage is asynchronous)."""
+        roots = [self.editor_data / "Resources/PackageManager/BuiltInPackages"]
+        roots.append(self.path / "Library/PackageCache")
+        archives = []
+        for root in roots:
+            if root.exists():
+                archives.extend(root.glob("com.unity.ugui*/Package Resources/TMP Essential Resources.unitypackage"))
+                archives.extend(root.glob("com.unity.textmeshpro*/Package Resources/TMP Essential Resources.unitypackage"))
+        if not archives:
+            raise RuntimeError("TextMesh Pro Essential Resources archive was not found in the installed Unity packages.")
+        count = 0
+        with tarfile.open(archives[0], "r:gz") as archive:
+            members = {m.name: m for m in archive.getmembers()}
+            for name, member in members.items():
+                if not name.endswith("/pathname") or not member.isfile():
+                    continue
+                rel = archive.extractfile(member).read().decode("utf-8").strip().replace("\\", "/")
+                if not (rel == "Assets/TextMesh Pro" or rel.startswith("Assets/TextMesh Pro/")):
+                    raise ValueError(f"Unexpected TMP archive path: {rel}")
+                target = (self.path / rel).resolve()
+                if ".." in rel.split("/") or not target.is_relative_to(self.path):
+                    raise ValueError(f"Unsafe TMP archive path: {rel}")
+                prefix = name.rsplit("/", 1)[0]
+                asset = members.get(prefix + "/asset")
+                if asset and asset.isfile():
+                    if target.exists():
+                        continue  # Preserve user-created settings/fonts and their matching GUIDs.
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(archive.extractfile(asset).read())
+                    count += 1
+                else:
+                    target.mkdir(parents=True, exist_ok=True)
+                meta = members.get(prefix + "/asset.meta")
+                meta_path = target.with_name(target.name + ".meta")
+                if meta and meta.isfile() and not meta_path.exists():
+                    meta_path.write_bytes(archive.extractfile(meta).read())
+        if count:
+            console.print(f"[cyan]Installed {count} TextMesh Pro resource files before launching Unity[/]")
 
     def screenshots(self, out_dir: Path) -> tuple[UnityResult, list[Path]]:
         if out_dir.exists():

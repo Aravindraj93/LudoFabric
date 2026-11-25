@@ -86,6 +86,16 @@ Use a recent CLI supporting `exec --ignore-user-config`. LudoFabric retains CLI 
 isolating inherited app model, plugin, and MCP settings. Empty model fields use the CLI default.
 Choose explicit models only when supported by your account.
 
+If a model works in VS Code but fails here, compare the CLI executable and version: a bundled
+extension binary can differ from the current standalone CLI. GPT-6.1 Sol has been verified with
+official Codex CLI **0.172.0**. LudoFabric prefers a standalone native CLI installed under the user's
+npm directory, or a project-local `.local-tools/codex` installation, over a VS Code binary on PATH.
+`CODEX_BIN` remains an explicit override. On Windows, this optional local install is detected automatically:
+
+```powershell
+npm install --prefix .local-tools/codex --no-save @openai/codex@0.172.0
+```
+
 ### 3. Launch
 
 ```powershell
@@ -224,8 +234,8 @@ asset settings, and quota-pause behavior.
 **Available:** local web dashboard, CLI, saved-project recovery, Unity bridge, package setup, task
 generation, repair/polish loops, and a Windows player build path.
 
-**Verified so far:** 24 automated recovery/setup/model-selection regression tests, a live Codex connectivity check,
-and Unity setup plus bridge compilation on 6000.5.0f1. These checks do not establish reliable
+**Verified so far:** 27 automated recovery/setup/model-selection regression tests, live Codex GPT-6.1 Sol access,
+and Unity setup, compilation, and scene-builder execution on 6000.5.0f1. These checks do not establish reliable
 end-to-end generation for every game or provider.
 
 **Not yet shipped:** packaged Windows app, cloud workers, automatic restart scheduling, or Android/AAB

@@ -84,15 +84,17 @@ def rejected_models(pid: str) -> set[str]:
     """Use explicit provider rejections, not assumptions about model names or capabilities."""
     path = STUDIO_DIR / "rejected_models.json"
     saved = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    rejected = set(saved.get(pid, []))
+    binary = Config().codex_bin if pid == "codex" else ""
+    scope = f"{pid}:{binary}" if binary else pid
+    rejected = set(saved.get(scope, []))
     previous = STUDIO_DIR / "job.json"
     if previous.exists():
         job = json.loads(previous.read_text(encoding="utf-8"))
-        if job.get("provider") == pid:
+        if job.get("provider") == pid and (not binary or job.get("provider_binary") == binary):
             match = re.search(r"The ['\"]([^'\"]+)['\"] model is not supported", job.get("error") or "")
             if match:
                 rejected.add(match.group(1))
-                saved[pid] = sorted(rejected)
+                saved[scope] = sorted(rejected)
                 atomic_json(path, saved)
     return rejected
 
@@ -284,6 +286,7 @@ class JobRunner:
                        "started": time.time(), "provider": job.provider, "project_path": str(project_path),
                        "state": "running"}
         self.status["models"] = {field: getattr(job, field) for field in MODEL_FIELDS}
+        self.status["provider_binary"] = cfg.codex_bin if job.provider == "codex" else ""
         self.persist()
         self.thread = threading.Thread(target=self._run, args=(job, project_path), daemon=True)
         self.thread.start()

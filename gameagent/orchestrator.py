@@ -98,7 +98,10 @@ class Orchestrator:
         if not self.state.builder_methods:
             self._note("[yellow]  no builder methods registered[/]")
             return False
-        for attempt in range(1, self.cfg.max_fix_attempts + 1):
+        # Bootstrap prerequisites must run before dependent scene/UI builders.
+        for attempt in range(1, self.cfg.max_fix_attempts + 2):
+            self.state.builder_methods.sort(key=lambda m: 0 if "TextMeshProBootstrap" in m else 1)
+            self._save()
             if not self._compile_fix_loop():
                 return False
             res = self.project.run_builders(self.state.builder_methods)
@@ -106,6 +109,8 @@ class Orchestrator:
                 for line in (res.bridge or {}).get("info", []):
                     console.print(f"[dim]    {line}[/]")
                 return True
+            if attempt > self.cfg.max_fix_attempts:
+                return False
             self._note(f"[yellow]  scene builders failed (attempt {attempt}); fixing...[/]")
             self._apply(self.studio.fix(
                 "Scene builder execution failed in batch mode (Editor, not play mode). Make builders robust "

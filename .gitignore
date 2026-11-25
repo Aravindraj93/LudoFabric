@@ -13,6 +13,7 @@ __pycache__/
 .venv-local/
 .local-python/
 .local-cache/
+.local-tools/
 local_test/
 design_out/
 *.agent/

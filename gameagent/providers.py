@@ -11,6 +11,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from .cli import find_cli
 
 HOME = Path(os.path.expanduser("~"))
 
@@ -28,8 +29,7 @@ class Provider:
     notes: str = ""
 
     def path(self) -> str:
-        override = os.getenv(f"{self.id.upper()}_BIN")
-        return override or shutil.which(self.bin) or ""
+        return find_cli(self.id)
 
     def installed(self) -> bool:
         return bool(self.path())

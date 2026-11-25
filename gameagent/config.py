@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
+from .cli import find_cli
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 load_dotenv()
@@ -37,7 +38,7 @@ class Config:
     json_mode: bool = field(default_factory=lambda: _env("LLM_JSON_MODE", "1") == "1")
 
     # Codex CLI backend
-    codex_bin: str = field(default_factory=lambda: _env("CODEX_BIN") or shutil.which("codex") or "")
+    codex_bin: str = field(default_factory=lambda: find_cli("codex"))
     codex_reasoning: str = field(default_factory=lambda: _env("CODEX_REASONING_EFFORT"))  # low|medium|high
     codex_timeout: int = field(default_factory=lambda: _int("CODEX_TIMEOUT_SECONDS", 1500))
     codex_limit_wait_minutes: int = field(default_factory=lambda: _int("CODEX_LIMIT_WAIT_MINUTES", 300))

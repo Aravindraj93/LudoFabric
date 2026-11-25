@@ -106,8 +106,10 @@ class ModelSelectionTests(unittest.TestCase):
     def test_known_rejected_model_is_removed_from_cache_suggestions(self):
         root = Path(self.tmp.name)
         (root / "models_cache.json").write_text(json.dumps({"models": [{"slug": "bad-model"}, {"slug": "good-model"}]}))
-        (root / "job.json").write_text(json.dumps({"provider": "codex", "error": "The 'bad-model' model is not supported"}))
-        with patch.dict(os.environ, {"CODEX_HOME": str(root)}), patch.object(server, "_model_access", {}):
+        (root / "job.json").write_text(json.dumps({"provider": "codex", "provider_binary": "test-codex", "error": "The 'bad-model' model is not supported"}))
+        with patch.dict(os.environ, {"CODEX_HOME": str(root)}), patch.object(server, "_model_access", {}), \
+             patch.object(server, "Config", return_value=Mock(codex_bin="test-codex", llm_backend="codex")), \
+             patch.object(server, "provider_models", return_value={}):
             self.assertEqual([m["id"] for m in server.model_choices("codex")["models"]], ["good-model"])
             (root / "job.json").write_text(json.dumps({"provider": "codex", "error": None}))
             self.assertEqual([m["id"] for m in server.model_choices("codex")["models"]], ["good-model"])
