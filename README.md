@@ -18,6 +18,22 @@ Describe a game. Follow the plan. Build locally. Pick up where you left off.
 
 ---
 
+## See LudoFabric in action
+
+### From your idea to the live studio
+
+![Recorded LudoFabric dashboard walkthrough showing the game prompt, pipeline, live logs, and project documents](docs/assets/ludofabric-studio.gif)
+
+A recorded walkthrough of the local dashboard: describe a game, follow the pipeline, and inspect
+the generated project documents. This preview shows the development workflow, not a finished game.
+
+### A little office for a big idea
+
+![Recorded interactive LudoFabric 3D office with animated specialist characters and an orbiting camera](docs/assets/ludofabric-office.gif)
+
+The interactive 3D office turns pipeline stages into an animated scene. It is a stage visualization,
+not a display of actual model activity or hidden reasoning.
+
 ## Your idea, a coordinated studio
 
 LudoFabric turns a game description into a structured Unity development workflow. A director shapes
