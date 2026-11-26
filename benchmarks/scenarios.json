@@ -1,0 +1,20 @@
+[
+  {
+    "id": "coin-prototype",
+    "status": "input-only; not an automated end-to-end benchmark result",
+    "request": "Create a small Windows coin collector using primitives, one arena, keyboard input, ten coins and restart. No downloads.",
+    "checks": ["Scope stays a prototype", "No asset downloads", "Movement, collection and restart work"]
+  },
+  {
+    "id": "runner-campaign",
+    "status": "input-only; not yet built or validated",
+    "request": "Create a three-stage Windows endless-runner campaign with distinct obstacle patterns, stage unlocks and per-stage records. Use primitives and no downloaded assets.",
+    "checks": ["Exactly three authored stages", "Progression persists", "Collision and retry work", "No unrelated coin mechanics are introduced"]
+  },
+  {
+    "id": "target-practice",
+    "status": "input-only; not yet built or validated",
+    "request": "Create a small Windows target-practice game with mouse aiming, scored targets, a timed round and instant retry. Use primitives and no downloaded assets.",
+    "checks": ["Aiming and hit scoring work", "Round timing and retry work", "No unnecessary campaign or asset requests"]
+  }
+]

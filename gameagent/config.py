@@ -59,9 +59,14 @@ class Config:
     max_fix_attempts: int = field(default_factory=lambda: _int("MAX_FIX_ATTEMPTS", 4))
     polish_rounds: int = field(default_factory=lambda: _int("POLISH_ROUNDS", 2))
     context_char_budget: int = field(default_factory=lambda: _int("CONTEXT_CHAR_BUDGET", 90000))
+    brief_mode: str = field(default_factory=lambda: _env("BRIEF_MODE", "auto").lower())
+    max_llm_calls: int = field(default_factory=lambda: max(0, _int("MAX_LLM_CALLS", 0)))
+    max_job_seconds: int = field(default_factory=lambda: max(0, _int("MAX_JOB_SECONDS", 0)))
 
     def validate(self, need_unity: bool = True) -> None:
         errors = []
+        if self.brief_mode not in ("auto", "template", "ai"):
+            errors.append("BRIEF_MODE must be auto, template or ai")
         if self.llm_backend == "codex":
             if not self.codex_bin:
                 errors.append("Codex CLI not found. Install it: npm install -g @openai/codex")

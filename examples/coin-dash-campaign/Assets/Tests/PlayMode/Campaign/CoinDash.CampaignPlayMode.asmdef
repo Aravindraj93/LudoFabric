@@ -1,0 +1,7 @@
+{
+  "name": "CoinDash.CampaignPlayMode",
+  "references": ["CoinDash.Runtime", "LudoFabric.Runtime", "Unity.ugui"],
+  "includePlatforms": [],
+  "optionalUnityReferences": ["TestAssemblies"],
+  "autoReferenced": false
+}

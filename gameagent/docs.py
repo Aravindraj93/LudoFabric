@@ -29,6 +29,13 @@ def design_md(d: dict) -> str:
         _sec("Controls", _ul(d.get("controls"))),
         _sec("Win / lose", d.get("win_lose", "") if isinstance(d.get("win_lose"), str) else _ul(d.get("win_lose"))),
         _sec("Levels", _ul(d.get("levels"))),
+        _sec("Scope and asset policy", f"Scope: {d.get('scope', 'vertical_slice')}\n\nAsset policy: {d.get('asset_policy', 'free_assets')}"),
+        _sec("Progression", "\n\n".join(
+            f"### {stage.get('title', '')} ({stage.get('id', '')})\n\n"
+            f"**Objective:** {stage.get('objective', '')}\n\n**New challenge:** {stage.get('new_challenge', '')}\n\n"
+            f"**Difficulty:** {stage.get('difficulty', '')}\n\n**Unlock:** {stage.get('unlock_rule', '')}"
+            for stage in d.get("progression", [])) or "No campaign progression requested."),
+        _sec("Replay incentives", _ul(d.get("replay_incentives"))),
         _sec("UI screens", _ul(d.get("ui_screens"))),
         _sec("Art direction", "\n".join([
             f"**Style:** {art.get('style', '')}", "", f"**Palette:** {palette}", "",
@@ -55,6 +62,10 @@ def plan_md(p: dict) -> str:
     lines.append(_sec("Systems", "\n".join(sys_rows)))
     lines.append(_sec("Scenes (build order)", _ul([f"`{x}`" for x in a.get("scenes", [])])))
     lines.append(_sec("Conventions", _ul(a.get("conventions"))))
+    if p.get("contracts"):
+        lines.append(_sec("Shared code contracts", "\n\n".join(
+            f"### {contract.get('path', '')}\n\nOwner: {contract.get('owner', '')}\n\n" +
+            _ul(contract.get("public_api")) for contract in p["contracts"])))
     asset_rows = ["| Key | Kind | Search | Purpose |", "|---|---|---|---|"]
     for x in p.get("assets", []):
         asset_rows.append(f"| `{x.get('key', '')}` | {x.get('kind', '')} | {x.get('query', '')} | {x.get('purpose', '').replace('|', '/')} |")
@@ -77,14 +88,14 @@ AI_PROMPT_HEADER = """# AI build prompt: {title}
 > It contains the complete design, the architecture and an ordered task list.
 
 You are a senior Unity team in one person: gameplay programmer, technical artist, VFX artist, animator,
-UI engineer and level designer. Build the game described below as a polished vertical slice.
+UI engineer and level designer. Build the game at its stated scope; preserve requested progression and level count.
 
 ## Hard requirements
 - Unity 6 (6000.x), Universal Render Pipeline, C#, new Input System (UnityEngine.InputSystem), Cinemachine 3, TextMeshPro.
 - Clean modular architecture: one class per file, ScriptableObject configs for tunables, events between systems.
 - Everything must compile on the first try: no pseudo-code, no TODO stubs, complete files only.
-- Visual quality is first-class. Follow the art direction exactly (palette, lighting, post-processing),
-  layered particle VFX with HDR emissive colours feeding bloom, eased animations, and game-feel juice.
+- Follow the art direction and performance constraints. Do not add expensive post-processing, downloaded
+  assets or scope that the design forbids. Preserve the shared API contracts and executable acceptance criteria.
 - Use free CC0 / CC-BY 3D assets (Poly Haven, Sketchfab) where listed, and build the rest procedurally.
 - Work through the tasks IN ORDER. After each task, list the files you created and how to test them in the Editor.
 """

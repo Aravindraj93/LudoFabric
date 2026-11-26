@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import time
 import tarfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
@@ -15,6 +16,7 @@ from .runner import UnityResult, UnityRunner
 
 from ..ui import console
 BRIDGE_SRC = Path(__file__).parent / "bridge"
+STARTER_SRC = Path(__file__).parent / "starter"
 BRIDGE_DST = "Assets/GameAgentBridge/Editor"
 CODE_EXT = {".cs", ".shader", ".hlsl", ".cginc", ".asmdef", ".asmref", ".json", ".uss", ".uxml"}
 
@@ -117,22 +119,44 @@ class UnityProject:
             if text2 != text:
                 ps.write_text(text2, encoding="utf-8")
 
+    def repair_package_compatibility(self) -> bool:
+        manifest = self.path / "Packages/manifest.json"
+        before = manifest.read_bytes()
+        self._configure_packages()
+        return manifest.read_bytes() != before
+
     def install_bridge(self) -> None:
         dst = self.path / BRIDGE_DST
         dst.mkdir(parents=True, exist_ok=True)
         for f in BRIDGE_SRC.iterdir():
             if f.is_file():
                 shutil.copy2(f, dst / f.name)
+        self.install_starter()
+
+    def install_starter(self) -> None:
+        """Reusable, independently compiled campaign data/progress foundation."""
+        dst = self.path / "Assets/LudoFabricStarter/Runtime"
+        dst.mkdir(parents=True, exist_ok=True)
+        for source in STARTER_SRC.iterdir():
+            if source.is_file():
+                target = dst / source.name
+                if not target.exists() or target.read_bytes() != source.read_bytes():
+                    shutil.copy2(source, target)
 
     # ------------------------------------------------------------------ file ops
     def safe_path(self, rel: str) -> Path:
         rel = rel.replace("\\", "/").lstrip("/")
-        if not rel.startswith("Assets/") or ".." in rel.split("/") or rel.startswith("Assets/GameAgentBridge"):
+        if not rel.startswith("Assets/") or ".." in rel.split("/") or rel.startswith(("Assets/GameAgentBridge", "Assets/LudoFabricStarter")):
             raise ValueError(f"refusing to write outside Assets/ or into the bridge: {rel}")
-        return self.path / rel
+        target = (self.path / rel).resolve()
+        if not target.is_relative_to(self.path) or target.relative_to(self.path).as_posix().startswith(("Assets/GameAgentBridge", "Assets/LudoFabricStarter")):
+            raise ValueError(f"refusing to write through an unsafe/protected asset path: {rel}")
+        return target
 
     def write_file(self, rel: str, content: str) -> None:
         p = self.safe_path(rel)
+        if p.exists() and p.read_text(encoding="utf-8") == content:
+            return
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8", newline="\n")
 
@@ -145,7 +169,12 @@ class UnityProject:
                 meta.unlink()
 
     def read_file(self, rel: str) -> str | None:
-        p = self.path / rel
+        rel = rel.replace("\\", "/")
+        if not rel.startswith("Assets/") or ".." in rel.split("/"):
+            return None
+        p = (self.path / rel).resolve()
+        if not p.is_relative_to(self.path):
+            return None
         return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else None
 
     def code_files(self) -> list[str]:
@@ -228,19 +257,27 @@ class UnityProject:
                                method="GameAgent.Bridge.AgentBridge.Build",
                                extra={"-agentBuildPath": str(exe)})
 
-    def run_tests(self, platform: str) -> tuple[bool, str]:
+    def run_tests(self, platform: str, test_filter: str | None = None) -> tuple[bool, str]:
         results = self.state_dir / "unity_logs" / f"tests_{platform}.xml"
         if results.exists():
             results.unlink()
-        self.runner.run(self._pp() + ["-runTests", "-testPlatform", platform, "-testResults", str(results)],
-                        f"tests_{platform}", quit=False, nographics=(platform == "EditMode"))
+        args = self._pp() + ["-runTests", "-testPlatform", platform, "-testResults", str(results)]
+        if test_filter:
+            args += ["-testFilter", test_filter]
+        run = self.runner.run(args, f"tests_{platform}", quit=False, nographics=(platform == "EditMode"))
         if not results.exists():
-            return True, "no test results (no tests found)"
-        xml = results.read_text(encoding="utf-8", errors="replace")
-        failed = re.findall(r'<test-case[^>]*name="([^"]+)"[^>]*result="Failed".*?<message><!\[CDATA\[(.*?)\]\]>', xml, re.S)
-        if not failed:
-            return True, "all tests passed"
-        return False, "\n".join(f"{n}: {m.strip()[:800]}" for n, m in failed)
+            return False, "Unity produced no test results. " + run.error_text()
+        try:
+            xml = ET.parse(results).getroot()
+        except ET.ParseError as exc:
+            return False, f"Invalid Unity test report: {exc}"
+        cases = xml.findall(".//test-case")
+        failed = [c for c in cases if c.get("result") == "Failed"]
+        if failed:
+            return False, "\n".join(f"{c.get('fullname', c.get('name'))}: {c.findtext('failure/message', '')[:800]}" for c in failed)
+        if not run.ok or xml.get("result") == "Failed" or not cases:
+            return False, "Unity tests did not complete successfully. " + run.error_text()
+        return True, f"{len(cases)} tests reported; {sum(c.get('result') == 'Passed' for c in cases)} passed"
 
     def smoke_run(self, exe: Path, seconds: int = 25) -> tuple[bool, str]:
         """Launches the built player windowed for a few seconds and scans its log for runtime exceptions."""

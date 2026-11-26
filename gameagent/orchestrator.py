@@ -51,12 +51,35 @@ class Orchestrator:
         console.print(msg)
         self.state.log.append(re.sub(r"\[/?[a-z ]+\]", "", msg))
 
+    def _prepared_files(self, out: AgentOutput) -> dict[str, str]:
+        prepared = {f.path: f.content for f in out.files}
+        for patch in out.patches:
+            self.project.safe_path(patch.path)
+            source = prepared.get(patch.path)
+            if source is None: source = self.project.read_file(patch.path)
+            if source is None or not patch.old:
+                raise ValueError(f"Patch requires an existing file and non-empty context: {patch.path}")
+            if source.count(patch.old) != 1:
+                if patch.new and source.count(patch.new) == 1:
+                    prepared[patch.path] = source  # Already applied before interruption.
+                    continue
+                raise ValueError(f"Patch context is stale or ambiguous: {patch.path}. Regenerate against current contents.")
+            prepared[patch.path] = source.replace(patch.old, patch.new, 1)
+        for rel in prepared:
+            self.project.safe_path(rel)
+        if set(out.delete) & set(prepared):
+            raise ValueError("An agent cannot write and delete the same file in one output.")
+        for path in out.delete:
+            self.project.safe_path(path)
+        return prepared
+
     def _apply(self, out: AgentOutput) -> list[str]:
         written = []
-        for f in out.files:
+        prepared = self._prepared_files(out)
+        for path, content in prepared.items():
             try:
-                self.project.write_file(f.path, f.content)
-                written.append(f.path)
+                self.project.write_file(path, content)
+                written.append(path)
             except ValueError as exc:
                 console.print(f"[yellow]  skipped: {exc}[/]")
         for d in out.delete:
@@ -73,16 +96,34 @@ class Orchestrator:
         return written
 
     def _compile_fix_loop(self, hint_files: list[str] | None = None) -> bool:
+        seen = set()
+        package_repair_attempted = False
         for attempt in range(1, self.cfg.max_fix_attempts + 1):
             res = self.project.compile()
             if res.ok:
                 return True
             errors = res.error_text()
+            if re.search(r"No valid Unity Editor license|No valid Unity license", res.log, re.I):
+                raise RuntimeError("Unity has no valid Editor license. Activate it in Unity Hub; no AI code repair was attempted.")
+            if any(e["file"].startswith(("Assets/GameAgentBridge/", "Assets/LudoFabricStarter/")) for e in res.compile_errors):
+                raise RuntimeError("Protected LudoFabric integration code failed to compile. Update/fix the tool; "
+                                   "specialists must not overwrite its bridge or foundation.\n" + errors)
+            if any(e["file"].startswith(("Library/PackageCache/", "Packages/")) for e in res.compile_errors):
+                if not package_repair_attempted:
+                    package_repair_attempted = True
+                    if self.project.repair_package_compatibility():
+                        continue
+                raise RuntimeError("Unity package compatibility failed. These files are not agent-owned; "
+                                   "stopped instead of spending AI calls rewriting package code.\n" + errors)
+            signature = tuple(sorted((e["file"], e["code"], e["msg"]) for e in res.compile_errors)) if res.compile_errors else errors
+            if signature in seen:
+                raise RuntimeError("The same compiler errors returned after repair. Stopped to avoid spending more AI calls without progress.\n" + errors)
+            seen.add(signature)
             self._note(f"[yellow]  compile failed (attempt {attempt}/{self.cfg.max_fix_attempts}); fixing...[/]")
             self._apply(self.studio.fix(errors, hint_files))
         ok = self.project.compile().ok
         if not ok:
-            self._note("[red]  could not reach a clean compile; continuing (later fixes may resolve it)[/]")
+            self._note("[red]  could not reach a clean compile; progress saved[/]")
         return ok
 
     def _builder_files(self) -> list[str]:
@@ -192,22 +233,55 @@ class Orchestrator:
         # Journal complete model output before changing Unity files. Interrupted writes can be replayed.
         task_key = hashlib.sha256(task.id.encode()).hexdigest()
         journal = self.state_dir / "task_outputs" / f"{task_key}.json"
+        signature = hashlib.sha256(json.dumps({
+            "task": task.model_dump(mode="json", exclude={"status"}),
+            "design": self.state.design.model_dump(mode="json") if self.state.design else None,
+            "contracts": [c.model_dump(mode="json") for c in self.state.plan.contracts] if self.state.plan else [],
+        }, sort_keys=True).encode()).hexdigest()
+        def file_hash(path):
+            source = self.project.read_file(path)
+            return hashlib.sha256(source.replace("\r\n", "\n").encode()).hexdigest() if source is not None else None
         if journal.exists():
-            out = AgentOutput.model_validate(json.loads(journal.read_text(encoding="utf-8")))
-            written = self._apply(out)
-            task.outputs = list(dict.fromkeys(task.outputs + written))
-            task.status = "done" if written or out.builder_methods else "failed"
-            self._save()
-            return
+            saved = json.loads(journal.read_text(encoding="utf-8"))
+            valid = "version" not in saved or (saved["signature"] == signature and all(
+                file_hash(path) in (before, saved["produced"].get(path, before))
+                for path, before in saved["inputs"].items()))
+            if valid:
+                out = AgentOutput.model_validate(saved.get("output", saved))
+                written = self._apply(out)
+                task.outputs = list(dict.fromkeys(task.outputs + written))
+                task.status = "done" if written or out.builder_methods or out.delete else "failed"
+                self._save()
+                return
+            console.print("[dim]  Task inputs changed; regenerating its stale checkpoint.[/]")
         done = [t for t in self.state.plan.tasks if t.status == "done"]
         brief = self.studio.brief(task, self.state.design, self.state.plan, self.assets.describe_for_agents(), done)
         (self.state_dir / "prompts").mkdir(exist_ok=True)
         (self.state_dir / "prompts" / f"{task_key}.md").write_text(brief.prompt, encoding="utf-8")
+        before_generation = {path: file_hash(path) for path in self.project.code_files()}
+        before_generation.update({path: file_hash(path) for path in task.outputs + brief.relevant_files})
         out = self.studio.execute(task.role, brief, task)
-        atomic_json(journal, out.model_dump(mode="json"))
+        prepared = self._prepared_files(out)
+        dependencies = set(task.depends_on)
+        if self.state.plan:
+            previous = set()
+            while previous != dependencies:
+                previous = set(dependencies)
+                dependencies.update(d for t in self.state.plan.tasks if t.id in previous for d in t.depends_on)
+        paths = set(brief.relevant_files) | set(prepared) | set(out.delete)
+        if self.state.plan:
+            paths.update(p for t in self.state.plan.tasks if t.id in dependencies for p in t.outputs)
+        for path in paths:
+            if file_hash(path) != before_generation.get(path):
+                raise RuntimeError(f"{path} changed while the specialist was working. No generated files were applied; "
+                                   "resume to regenerate against the current project.")
+        produced = {path: hashlib.sha256(content.replace("\r\n", "\n").encode()).hexdigest() for path, content in prepared.items()}
+        produced.update({path: None for path in out.delete})
+        atomic_json(journal, {"version": 2, "signature": signature, "output": out.model_dump(mode="json"),
+                              "inputs": {path: file_hash(path) for path in paths}, "produced": produced})
         written = self._apply(out)
         task.outputs = list(dict.fromkeys(task.outputs + written))
-        task.status = "done" if written or out.builder_methods else "failed"
+        task.status = "done" if written or out.builder_methods or out.delete else "failed"
         self._save()
 
     def _build_tasks(self) -> None:
@@ -230,7 +304,8 @@ class Orchestrator:
                     raise
                 touched += task.outputs
                 self._save()
-            self._compile_fix_loop(touched)
+            if not self._compile_fix_loop(touched):
+                raise RuntimeError("Compilation still fails. Progress saved; inspect errors before resuming.")
         console.rule("Building scenes")
         if not all(t.status == "done" for t in self.state.plan.tasks):
             raise RuntimeError("Production tasks remain incomplete. Resume to retry them.")
@@ -292,6 +367,9 @@ class Orchestrator:
                 self._note(f"[yellow]  {platform} tests failed; fixing[/]")
                 self._apply(self.studio.fix(f"Unity {platform} test failures:\n{details}"))
                 self._compile_fix_loop()
+                ok, details = self.project.run_tests(platform)
+                if not ok:
+                    raise RuntimeError(f"Unity {platform} tests still fail after repair:\n{details}")
         exe = self.project_path / "Build" / f"{re.sub(r'[^A-Za-z0-9]+', '', self.state.design.title) or 'Game'}.exe"
         for attempt in range(1, 3):
             self._compile_fix_loop()

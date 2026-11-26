@@ -52,6 +52,7 @@ The goal is a transparent, recoverable workflow you can inspect and improve.
 | **Repair loops** | Compiler and runtime errors fed back into the generation workflow |
 | **Visual feedback** | Screenshot-based art reviews and configurable polish passes |
 | **Resumable work** | Disk checkpoints, cached responses, and journaled task outputs |
+| **Efficient generation** | Shared contracts, focused context, template briefs, exact patches, budgets, and measured timings |
 | **Live dashboard** | Progress, documents, logs, screenshots, and an interactive 3D office |
 | **Multiple backends** | Codex, Claude Code, Gemini CLI, Qwen Code, OpenAI-compatible APIs |
 | **Asset sourcing** | Poly Haven and optional Sketchfab integration with generated credits |
@@ -250,9 +251,13 @@ asset settings, and quota-pause behavior.
 **Available:** local web dashboard, CLI, saved-project recovery, Unity bridge, package setup, task
 generation, repair/polish loops, and a Windows player build path.
 
-**Verified so far:** 27 automated recovery/setup/model-selection regression tests, live Codex GPT-6.1 Sol access,
+**Verified so far:** 50 automated pipeline/recovery/model-selection regression tests, live Codex GPT-6.1 Sol access,
 and Unity setup, compilation, and scene-builder execution on 6000.5.0f1. These checks do not establish reliable
 end-to-end generation for every game or provider.
+
+See [efficiency and reliability](docs/EFFICIENCY.md) for the implemented tool improvements and next batches.
+The [Coin Dash campaign reference upgrade](examples/coin-dash-campaign/README.md) exercises reusable data,
+progression, runtime checks, and a Windows build without prescribing that genre for other projects.
 
 **Not yet shipped:** packaged Windows app, cloud workers, automatic restart scheduling, or Android/AAB
 release builds. An Android prompt does not change the Windows build target. Store readiness and
@@ -273,6 +278,10 @@ approval require separate implementation and validation.
 - [x] Replay interrupted production writes and reuse completed responses
 - [x] Resume saved projects by path
 - [x] Read installed Unity package compatibility requirements
+- [x] Shared API contracts, focused context, and optional deterministic briefs
+- [x] Dependency-aware task checkpoints and protection for edits made during generation
+- [x] Safe exact-match patches, budgets, and per-project efficiency measurements
+- [x] Optional reusable campaign data/save foundation with a tested reference upgrade
 - [ ] Validate and publish a complete reproducible reference game
 - [ ] Explicit cancellation and a durable background job queue
 - [ ] Windows app using the same dashboard and worker

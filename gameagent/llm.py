@@ -14,13 +14,14 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Type, TypeVar
+from typing import Any, Type, TypeVar, Callable
 
 from pydantic import BaseModel, ValidationError
 
 from .config import Config
 from .ui import console
 from .state import atomic_json
+from .metrics import record
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -28,6 +29,10 @@ LIMIT_PATTERNS = re.compile(r"usage limit|rate limit|too many requests|429|quota
 
 
 class FatalLLMError(SystemExit):
+    pass
+
+
+class BudgetReached(FatalLLMError):
     pass
 
 
@@ -89,7 +94,9 @@ class _OpenAIResponses:
         if json_mode and self.cfg.json_mode:
             kwargs["text"] = {"format": {"type": "json_object"}}
         try:
-            return self.client.responses.create(**kwargs).output_text or ""
+            response = self.client.responses.create(**kwargs)
+            self.last_usage = response.usage.model_dump() if response.usage else None
+            return response.output_text or ""
         except (AuthenticationError, PermissionDeniedError, NotFoundError, BadRequestError) as exc:
             raise FatalLLMError(f"LLM request rejected ({exc.__class__.__name__}): {exc}")
 
@@ -115,6 +122,7 @@ class _ChatCompletions:
             resp = self.client.chat.completions.create(**kwargs)
         except (AuthenticationError, PermissionDeniedError, NotFoundError, BadRequestError) as exc:
             raise FatalLLMError(f"LLM request rejected ({exc.__class__.__name__}): {exc}")
+        self.last_usage = resp.usage.model_dump() if resp.usage else None
         return resp.choices[0].message.content or ""
 
 
@@ -240,6 +248,8 @@ class LLM:
             self.backend = {"codex": _CodexCLI, "openai": _OpenAIResponses, "chat": _ChatCompletions}[cfg.llm_backend](cfg)
         self.log_dir = log_dir
         self._calls = 0
+        self._requests = 0
+        self._started = time.monotonic()
 
     def set_log_dir(self, log_dir: Path) -> None:
         self.log_dir = log_dir
@@ -264,30 +274,45 @@ class LLM:
                        image_hashes=[hashlib.sha256(p.read_bytes()).hexdigest() for p in image_paths])
         key = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
         cache = self.log_dir / "responses" / f"{key}.json" if self.log_dir else None
+        metrics = self.log_dir.parent / "metrics.jsonl" if self.log_dir else None
         pending = self.log_dir.parent / "pending_call.json" if self.log_dir else None
         if cache and cache.exists():
+            record(metrics, kind="llm", name=name, status="cache_hit", seconds=0, model=model)
             return json.loads(cache.read_text(encoding="utf-8"))["output"]
         if pending:
             atomic_json(pending, dict(name=name, key=key, status="running", request=request))
         delay, waited_for_limit, attempt = 10.0, 0, 0
         label = model or f"{self.cfg.llm_backend} default model"
         while True:
+            if ((self.cfg.max_llm_calls > 0 and self._requests >= self.cfg.max_llm_calls) or
+                (self.cfg.max_job_seconds > 0 and time.monotonic() - self._started >= self.cfg.max_job_seconds)):
+                if pending:
+                    atomic_json(pending, dict(name=name, key=key, status="budget_paused", request=request))
+                raise BudgetReached("Configured AI request/time budget reached. Progress saved; resume to start a new budget.")
             attempt += 1
+            self._requests += 1
+            started = time.monotonic()
             try:
                 t0 = time.time()
                 console.print(f"  ... {name} -> {label} (thinking; can take 1-5 min)")
                 out = self.backend.call(model, instructions, prompt, list(images or []), json_mode)
                 console.print(f"[dim]  {name}: answered in {time.time() - t0:.0f}s ({len(out)} chars)[/]")
                 self._log(name, instructions, prompt, out)
+                record(metrics, kind="llm", name=name, status="ok", model=model,
+                       seconds=round(time.monotonic() - started, 3), input_characters=len(instructions) + len(prompt),
+                       output_characters=len(out), backend=self.cfg.llm_backend,
+                       usage=getattr(self.backend, "last_usage", None) if isinstance(getattr(self.backend, "last_usage", None), dict) else None)
                 if cache:
                     atomic_json(cache, {"output": out})
                 if pending:
                     pending.unlink(missing_ok=True)
                 return out
             except FatalLLMError as exc:
+                record(metrics, kind="llm", name=name, status="error", seconds=round(time.monotonic() - started, 3))
                 self._log(name + "_error", instructions, prompt, str(exc))
                 raise
             except _UsageLimit as exc:
+                record(metrics, kind="llm", name=name, status="limit", seconds=round(time.monotonic() - started, 3))
                 retry_at = time.time() + self.cfg.codex_limit_retry_minutes * 60
                 if pending:
                     atomic_json(pending, dict(name=name, key=key, status="waiting_for_limit",
@@ -306,6 +331,7 @@ class LLM:
                 time.sleep(15 * 60)
                 waited_for_limit += 15
             except Exception as exc:
+                record(metrics, kind="llm", name=name, status="error", seconds=round(time.monotonic() - started, 3))
                 self._log(name + "_error", instructions, prompt, str(exc))
                 if attempt >= retries:
                     raise
@@ -317,7 +343,8 @@ class LLM:
                 delay *= 2
 
     def structured(self, schema: Type[T], *, model: str, instructions: str, prompt: str,
-                   images: list[Path] | None = None, name: str = "structured", retries: int = 3) -> T:
+                   images: list[Path] | None = None, name: str = "structured", retries: int = 3,
+                   validate: Callable[[T], None] | None = None) -> T:
         """Ask for JSON matching a pydantic schema; re-prompts with the validation error on failure."""
         schema_hint = json.dumps(schema.model_json_schema(), indent=1)
         full_prompt = f"{prompt}\n\nRespond ONLY with a single JSON object that matches this JSON schema:\n{schema_hint}"
@@ -328,9 +355,11 @@ class LLM:
             raw = self.complete(model=model, instructions=instructions, prompt=p, images=images,
                                 json_mode=True, name=name)
             try:
-                return schema.model_validate(_extract_json(raw))
+                result = schema.model_validate(_extract_json(raw))
+                if validate: validate(result)
+                return result
             except (ValueError, ValidationError) as exc:
                 last_err = str(exc)[:2000]
-                console.print(f"[yellow]Invalid JSON from model for {name} (attempt {attempt}): {last_err[:200]}[/]")
+                console.print(f"[yellow]Invalid model output for {name} (attempt {attempt}): {last_err[:200]}[/]")
         raise RuntimeError(f"Model failed to return valid {schema.__name__}: {last_err}")
 

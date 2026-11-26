@@ -423,6 +423,12 @@ footer span{color:#cfd3ff}
         <input id="modelVision" list="modelList" placeholder="provider default; requires image support">
         <button class="btn sm" onclick="testModel('modelVision',this)">Test review model</button>
         <div id="modelNote" class="hint" style="margin-top:10px"></div>
+        <details style="margin-top:18px"><summary>Efficiency controls</summary>
+          <label class="flabel">Task briefs</label><select id="briefMode"><option value="auto">Auto: templates for small contracted tasks</option><option value="template">Templates: skip AI brief calls</option><option value="ai">AI-generated briefs</option></select>
+          <label class="flabel">Maximum AI requests per run (0 = unlimited)</label><input id="maxCalls" type="number" min="0" step="1" value="0">
+          <label class="flabel">Elapsed-time budget in seconds (0 = unlimited)</label><input id="maxSeconds" type="number" min="0" step="1" value="0">
+          <div class="hint">Budgets pause before the next AI request. They do not interrupt an active request or Unity build.</div>
+        </details>
         <div style="margin-top:16px"><button class="btn sm" onclick="saveSettings()">Save settings</button></div>
       </div>
     </div>
@@ -820,6 +826,7 @@ async function loadSettings() {
   settings = await api("/api/settings");
   $("unity").value = settings.unity_editor || ""; $("root").value = settings.projects_root;
   $("effort").value = settings.codex_reasoning || ""; $("polish").value = settings.polish_rounds;
+  $("briefMode").value = settings.brief_mode || "auto"; $("maxCalls").value = settings.max_llm_calls || 0; $("maxSeconds").value = settings.max_job_seconds || 0;
   $("unityList").innerHTML = settings.unity_candidates.map(c => `<option value="${esc(c)}">`).join("");
   $("unityStatus").innerHTML = settings.unity_ok ? '<span class="pill ok">Unity found</span>'
     : settings.unity_candidates.length ? '<span class="pill warn">pick a detected Unity from the list</span>'
@@ -837,7 +844,8 @@ async function saveSettings() {
   const body = {unity_editor: $("unity").value, projects_root: $("root").value, codex_reasoning: $("effort").value,
                 polish_rounds: +$("polish").value, llm_backend: $("provider").value,
                 model_orchestrator:$("modelOrchestrator").value.trim(), model_coder:$("modelCoder").value.trim(),
-                model_vision:$("modelVision").value.trim()};
+                model_vision:$("modelVision").value.trim(), brief_mode:$("briefMode").value,
+                max_llm_calls:Math.max(0,+$("maxCalls").value), max_job_seconds:Math.max(0,+$("maxSeconds").value)};
   if ($("sketch").value) body.sketchfab_token = $("sketch").value;
   try { await api("/api/settings", {method: "POST", body: JSON.stringify(body)}); $("sketch").value = ""; await loadSettings(); toast("Settings saved", "ok"); }
   catch (e) { toast(e.message, "bad"); }
@@ -886,6 +894,7 @@ async function pollJob() {
   const mins = j.started ? Math.max(0, Math.round((Date.now() / 1000 - j.started) / 60)) : 0;
   $("jobText").innerHTML = running ? `AI is working on <b>${esc(j.project)}</b> · ${esc(j.mode)} · ${esc(j.provider)} · ${mins} min`
     : j.state === "waiting_for_limit" ? `Usage limit reached. Progress saved. Resume after your allowance resets.${j.retry_at ? ' Suggested retry: ' + esc(new Date(j.retry_at * 1000).toLocaleString()) : ''}`
+    : j.state === "budget_paused" ? `AI budget reached. Progress saved. Resume to start a new budget.`
     : j.state === "interrupted" ? `Interrupted: <b>${esc(j.project)}</b>. Select this project and Resume.`
     : j.error ? `<span style="color:var(--bad)">Last job failed:</span> ${esc(j.error.split("\n")[0].slice(0, 140))}`
     : j.project ? `Finished <b>${esc(j.project)}</b>` : "idle, ready for your idea";
@@ -915,7 +924,7 @@ async function showProject(name, quiet = false) {
   const s = d.state, g = s.design, plan = s.plan;
   if (!wasRunning && !liveRunning) setStage(PHASE_DONE[s.phase] ?? 0, -1);
   const key = JSON.stringify([name, s.phase, plan && plan.tasks.map(t => t.status), d.screenshots.length,
-                              (s.reviews || []).length, wasRunning, !!d.report]);
+                              (s.reviews || []).length, wasRunning, !!d.report, d.metrics]);
   if (quiet && key === detailKey) return;
   detailKey = key;
   if (!g) { $("detail").style.display = "none"; return; }
@@ -959,7 +968,8 @@ async function showProject(name, quiet = false) {
     <div class="docs">${docCards || '<span class="muted">No documents yet.</span>'}</div>
     ${reviews ? `<div class="dgrid">${reviews}</div>` : ""}
     ${shots}
-    <div class="hint" style="margin-top:16px">Unity project: ${esc(d.unity_project)}</div>`;
+    <div class="hint" style="margin-top:16px">Unity project: ${esc(d.unity_project)}</div>
+    ${d.metrics ? `<div class="hint" style="margin-top:10px">Measured since telemetry was enabled: ${esc(d.metrics.model_requests)} model requests · ${esc(d.metrics.cache_hits)} cache hits · ${esc(d.metrics.model_seconds)}s in models · ${esc(d.metrics.unity_runs)} Unity runs (${esc(d.metrics.unity_seconds)}s). CLI token usage is not reported.</div>` : ''}`;
   if (!quiet) $("detail").scrollIntoView({behavior: "smooth", block: "start"});
 }
 

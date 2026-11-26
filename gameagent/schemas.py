@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
 
 Role = Literal["gameplay", "graphics", "vfx", "animation", "ui", "level", "audio", "tests"]
 
@@ -39,6 +39,15 @@ class ArtDirection(_Base):
     references: list[str] = Field(default_factory=list)
 
 
+class StageDesign(_Base):
+    id: str
+    title: str
+    objective: str
+    new_challenge: str
+    difficulty: str
+    unlock_rule: str = "Complete the previous stage"
+
+
 class GameDesign(_Base):
     title: str
     genre: str
@@ -58,6 +67,17 @@ class GameDesign(_Base):
     game_feel: list[str] = Field(default_factory=list, description="juice: hitstop, shake, squash/stretch ...")
     assets_needed: list[str] = Field(default_factory=list)
     assumptions: list[str] = Field(default_factory=list, description="decisions made without asking the user")
+    scope: Literal["prototype", "vertical_slice", "campaign"] = "vertical_slice"
+    progression: list[StageDesign] = Field(default_factory=list, description="Distinct stages and their difficulty progression")
+    replay_incentives: list[str] = Field(default_factory=list)
+    asset_policy: Literal["procedural_only", "free_assets"] = "free_assets"
+
+    @model_validator(mode="after")
+    def _campaign_has_progression(self):
+        if self.scope == "campaign":
+            if len(self.progression) < 2 or len({s.id for s in self.progression}) != len(self.progression):
+                raise ValueError("Campaign scope requires at least two distinct stages with unique IDs.")
+        return self
 
 
 # ---------- Tech lead (plan) ----------
@@ -97,20 +117,63 @@ class Architecture(_Base):
     scenes: list[str] = Field(default_factory=list, description="Assets/Scenes/*.unity in build order")
 
 
+class CodeContract(_Base):
+    path: str
+    owner: Role
+    public_api: list[str]
+    consumers: list[str] = Field(default_factory=list)
+
+
 class Plan(_Base):
     architecture: Architecture
     assets: list[AssetRequest]
     tasks: list[TaskSpec]
+    contracts: list[CodeContract] = Field(default_factory=list, description="Shared signatures agreed before specialist implementation")
+
+    @model_validator(mode="after")
+    def _validate_graph(self):
+        by_id = {t.id: t for t in self.tasks}
+        if len(by_id) != len(self.tasks): raise ValueError("Task IDs must be unique.")
+        visiting, visited = set(), set()
+        def visit(key):
+            if key in visiting: raise ValueError(f"Task dependency cycle at {key}")
+            if key in visited: return
+            if key not in by_id: raise ValueError(f"Unknown dependency {key}")
+            visiting.add(key)
+            for dep in by_id[key].depends_on: visit(dep)
+            visiting.remove(key); visited.add(key)
+        for key in by_id: visit(key)
+        paths = [c.path for c in self.contracts]
+        if len(paths) != len(set(paths)): raise ValueError("Each shared contract needs one owning file/role.")
+        return self
 
 
 # ---------- Specialist output ----------
+def _safe_output_path(value):
+    if not isinstance(value, str): raise ValueError("Asset paths must be strings.")
+    value = value.replace("\\", "/")
+    if (not value.startswith("Assets/") or ".." in value.split("/") or ":" in value or "\0" in value or
+        value.startswith(("Assets/GameAgentBridge", "Assets/LudoFabricStarter"))):
+        raise ValueError("Write only to agent-owned Assets/ paths, not the protected bridge/foundation.")
+    return value
+
+
 class FileWrite(_Base):
-    path: str = Field(description="project-relative path, must start with Assets/")
+    path: str = Field(pattern=r"^Assets/", description="Agent-owned project-relative path under Assets/")
     content: str
+    _validate_path = field_validator("path", mode="before")(_safe_output_path)
+
+
+class FilePatch(_Base):
+    path: str = Field(pattern=r"^Assets/")
+    old: str = Field(min_length=1, description="Exact non-empty text occurring once in the current file")
+    new: str
+    _validate_path = field_validator("path", mode="before")(_safe_output_path)
 
 
 class AgentOutput(_Base):
     files: list[FileWrite] = Field(default_factory=list)
+    patches: list[FilePatch] = Field(default_factory=list, description="Small exact-match edits to existing files")
     delete: list[str] = Field(default_factory=list)
     builder_methods: list[str] = Field(
         default_factory=list,

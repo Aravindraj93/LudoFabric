@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 from ..ui import console
+from ..metrics import record
 
 CS_ERROR = re.compile(r"^(?P<file>[^\s(][^\r\n(]*\.cs)\((?P<line>\d+),(?P<col>\d+)\): error (?P<code>CS\d+): (?P<msg>.*)$", re.M)
 
@@ -92,6 +93,8 @@ class UnityRunner:
             except json.JSONDecodeError:
                 bridge = None
         res = UnityResult(rc, log, errors, bridge)
+        record(self.logs_dir.parent / "metrics.jsonl", kind="unity", name=name, ok=res.ok,
+               seconds=round(time.time() - t0, 3), compile_errors=len(errors))
         console.print(f"[dim]  unity< {name}: rc={rc} ok={res.ok} ({time.time() - t0:.0f}s, "
                       f"{len(errors)} compile errors)[/]")
         return res

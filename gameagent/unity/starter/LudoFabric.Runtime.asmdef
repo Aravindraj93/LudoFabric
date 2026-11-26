@@ -1,0 +1,6 @@
+{
+  "name": "LudoFabric.Runtime",
+  "rootNamespace": "LudoFabric.Runtime",
+  "references": [],
+  "autoReferenced": true
+}

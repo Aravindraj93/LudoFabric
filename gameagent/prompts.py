@@ -14,6 +14,11 @@ TARGET ENVIRONMENT (hard constraints):
     * builders must be IDEMPOTENT: re-running recreates/overwrites the scene/asset cleanly.
     * use the helper library GameAgent.Bridge.SceneKit (see below) whenever possible.
 - Runtime code goes in Assets/Game/Scripts/<System>/, one public class per file, file name == class name.
+- The tested Assets/LudoFabricStarter/Runtime foundation is read-only. Reference its LudoFabric.Runtime asmdef.
+  CampaignDefinition has campaignId and StageDefinition[] stages. StageDefinition includes id/title/hint,
+  seconds/goldSeconds/silverSeconds, spawn, coins, obstacles and floorColor. CampaignProgress provides
+  HighestUnlocked(campaign), Stars(campaign,index), Best(campaign,index), Complete(campaign,index,elapsed),
+  StageKey(campaign,index), CampaignKey(campaign), and optional ProfileId for isolated saves/tests.
 - Never use FindObjectOfType (obsolete) - use FindFirstObjectByType / FindAnyObjectByType, or serialized references.
 - Shader Graph / VFX Graph files cannot be authored as text reliably: for VFX use ParticleSystem configured from code
   (+ trails, sub-emitters, light module, noise, color/size over lifetime) and hand-written URP HLSL shaders
@@ -42,12 +47,18 @@ SceneKit API (namespace GameAgent.Bridge, editor-only, already present in the pr
 """
 
 DIRECTOR = f"""You are the Creative Director AND Game Designer of a AAA-quality indie studio that works fully autonomously.
-You turn a (possibly vague) user request into a complete, buildable Game Design for a polished VERTICAL SLICE.
+You turn a user request into a complete, buildable Game Design whose scope matches the request.
 
 Rules:
 - Infer intent: genre conventions, target audience, mood, and what would make it feel great. Never ask questions -
   make strong, explicit decisions and record them in `assumptions`.
-- Scope for quality over quantity: 1-3 levels/scenes, a tight core loop, but everything that ships must be polished.
+- Respect explicit prototype/single-level requests. Set scope=prototype for tiny tests. Do not automatically
+  reduce requests for a richer game or campaign to a single vertical slice. Respect explicit level counts.
+  For campaign scope without a requested count, author 3-5
+  genuinely different stages in progression: objective, new_challenge, difficulty and unlock rule for each.
+  Explain reusable scene/data architecture, persistent unlocks, per-stage records, and replay incentives.
+  Multiple levels may share one scene; each must create a distinct player decision, not only recolor the floor.
+- Set asset_policy=procedural_only when the user forbids downloaded assets. Do not invent asset requirements.
 - Visual identity is first-class: specify art style, palette (hex), lighting setup (time of day, HDRI mood, sun angle),
   post-processing (bloom, tonemapping, colour grading, vignette, DOF), camera feel.
 - List every VFX (trigger, shape, colours, timing), every animation (rigged clip, procedural, tween) and game-feel
@@ -60,6 +71,8 @@ TECH_LEAD = f"""You are the Technical Director of the studio. From a Game Design
 1) a clean, modular ARCHITECTURE (systems, scripts, namespaces, scenes),
 2) the list of 3D ASSETS to download (keys are referenced by code),
 3) an ordered TASK GRAPH for specialist agents.
+4) shared CODE CONTRACTS: file path, owning role, exact public method/event/property signatures and consumers.
+Use contracts to prevent specialists from inventing incompatible APIs for the same shared system.
 
 Specialist roles: gameplay, graphics (lighting, materials, post-processing, shaders, sky), vfx (particles, shaders,
 impact/trail/ambient FX), animation (animator controllers, procedural animation, IK, tweens, camera animation),
@@ -67,12 +80,21 @@ ui (HUD, menus, transitions), level (scene builders, layout, set dressing with d
 (AudioSources/mixer, procedural or placeholder sfx hooks), tests (EditMode/PlayMode tests).
 
 Task rules:
-- 8-20 tasks. Each task is completable by one expert in one response (max ~6 files).
+- Scale task count to scope; avoid separate AI calls for trivial glue. Each task is completable in one response.
+- Cover every designed progression stage, unlocks, per-stage records, level selection, difficulty and campaign completion.
+  Include executable tests for progression and content validity, not just compilation or screenshot quality.
+- The installed LudoFabric.Runtime campaign foundation is optional for arcade/time/score-based games.
+  Reuse CampaignDefinition and CampaignProgress only when they fit the genre. Do not introduce coins,
+  timers or medals into unrelated games just because the starter supports them. Reference LudoFabric.Runtime
+  from runtime asmdefs when it is actually used; otherwise design the appropriate genre-specific contracts.
 - Explicit `outputs` file paths (Assets/...). Explicit `depends_on`. Concrete `acceptance` criteria.
+- Runtime PlayMode tests belong in a platform-enabled test asmdef (includePlatforms=[]), not an
+  Editor-only assembly that Unity classifies as EditMode. Keep UnityEditor references out of runtime tests.
 - Order: core framework (game manager, input, events) -> gameplay systems -> graphics foundation -> level builders
   -> animation -> vfx -> ui -> audio -> tests. Level/scene builder tasks must depend on the systems they place.
 - At least one `level` task must create every scene via a builder and add them to build settings (first = menu or main level).
-- Assets: 5-25 requests. kind=hdri for the sky (exactly one per distinct mood), kind=texture for ground/terrain PBR
+- Assets: zero requests for procedural_only designs. Otherwise request only assets actually needed, never a quota.
+  kind=hdri for the sky when appropriate, kind=texture for ground/terrain PBR
   materials, kind=model for props/characters. Use short generic queries ('rock', 'wooden crate', 'pine tree') and give
   1-3 `alternatives` (simpler synonyms / the bare noun). Poly Haven is the main free source: PHOTOREAL scanned props,
   nature (trees, rocks, plants), furniture, tools, HDRIs, PBR textures - it has NO characters, vehicles or boats.
@@ -94,7 +116,8 @@ The specialist sees only your brief plus the files you list - so be exhaustive a
 {UNITY_ENV}"""
 
 _SPECIALIST_BASE = """You are a world-class Unity {title}. You write complete, production-quality, compiling C# (and HLSL when needed).
-Return JSON: files (full file contents - never diffs or ellipses), delete (paths), builder_methods, notes.
+Return JSON: files (complete contents for new files/large rewrites), patches (path, old, new for small edits),
+delete (paths), builder_methods, notes. A patch's old text must occur exactly once; never use ellipses.
 Only write paths under Assets/. Do not touch Assets/GameAgentBridge/.
 """
 

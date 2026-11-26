@@ -73,6 +73,9 @@ class Settings(BaseModel):
     model_orchestrator: str | None = None
     model_coder: str | None = None
     model_vision: str | None = None
+    brief_mode: str | None = None
+    max_llm_calls: int | None = None
+    max_job_seconds: int | None = None
 
 
 MODEL_FIELDS = ("model_orchestrator", "model_coder", "model_vision")
@@ -125,6 +128,7 @@ def get_settings():
         "projects_root": str(projects_root()), "sketchfab_token_set": bool(cfg.sketchfab_token),
         "codex_reasoning": cfg.codex_reasoning, "polish_rounds": cfg.polish_rounds,
         "models": provider_models(cfg.llm_backend),
+        "brief_mode": cfg.brief_mode, "max_llm_calls": cfg.max_llm_calls, "max_job_seconds": cfg.max_job_seconds,
         "unity_candidates": sorted(glob.glob(r"C:\Program Files\Unity\Hub\Editor\*\Editor\Unity.exe")
                                    + glob.glob(r"C:\Program Files\Unity*\Editor\Unity.exe"), reverse=True),
     }
@@ -144,6 +148,7 @@ def post_settings(s: Settings):
     mapping = {"llm_backend": "LLM_BACKEND", "unity_editor": "UNITY_EDITOR", "projects_root": "PROJECTS_ROOT",
                "sketchfab_token": "SKETCHFAB_API_TOKEN", "codex_reasoning": "CODEX_REASONING_EFFORT",
                "polish_rounds": "POLISH_ROUNDS"}
+    mapping.update(brief_mode="BRIEF_MODE", max_llm_calls="MAX_LLM_CALLS", max_job_seconds="MAX_JOB_SECONDS")
     for field, key in mapping.items():
         v = getattr(s, field)
         if v is not None:
@@ -302,12 +307,13 @@ class JobRunner:
             orch.run(job.request, stop_after="planned" if job.mode == "design" else None)
             self.status["state"] = "completed"
         except BaseException as exc:  # includes SystemExit from validation / fatal LLM errors
-            from gameagent.llm import UsageLimitReached
+            from gameagent.llm import UsageLimitReached, BudgetReached
             msg = str(exc) or exc.__class__.__name__
             if not isinstance(exc, SystemExit):
                 msg += "\n" + traceback.format_exc()[-2000:]
             self.status["error"] = msg
             self.status["state"] = "waiting_for_limit" if isinstance(exc, UsageLimitReached) else "failed"
+            if isinstance(exc, BudgetReached): self.status["state"] = "budget_paused"
             if isinstance(exc, UsageLimitReached):
                 self.status["retry_at"] = exc.retry_at
             console.print(f"JOB FAILED: {msg}")
@@ -443,6 +449,7 @@ def list_projects():
 
 @app.get("/api/projects/{name}")
 def project(name: str):
+    from gameagent.metrics import summarize
     d = _agent_dir(name)
     st = d / "state.json"
     if not st.exists():
@@ -451,7 +458,7 @@ def project(name: str):
     shots = sorted(str(p.relative_to(d)).replace("\\", "/") for p in d.glob("screens_round*/*.png"))
     report = (d / "REPORT.md").read_text(encoding="utf-8") if (d / "REPORT.md").exists() else ""
     return {"name": name, "state": s, "screenshots": shots, "report": report,
-            "unity_project": str(project_path(name))}
+            "unity_project": str(project_path(name)), "metrics": summarize(d / "metrics.jsonl")}
 
 
 @app.get("/api/projects/{name}/file/{rel:path}")
