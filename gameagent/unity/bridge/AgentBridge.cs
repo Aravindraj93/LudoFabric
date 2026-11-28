@@ -255,13 +255,54 @@ namespace GameAgent.Bridge
         public static void Build()
         {
             var outPath = Arg("-agentBuildPath") ?? "Build/Game.exe";
+            var platform = (Arg("-agentPlatform") ?? "windows").ToLowerInvariant();
             var scenes = EditorBuildSettings.scenes.Where(s => s.enabled && File.Exists(s.path)).Select(s => s.path).ToArray();
             if (scenes.Length == 0) { Errors.Add("No scenes in build settings"); WriteResult(false); return; }
+            BuildTarget target; BuildTargetGroup group;
+            switch (platform)
+            {
+                case "android": target = BuildTarget.Android; group = BuildTargetGroup.Android; break;
+                case "ios": target = BuildTarget.iOS; group = BuildTargetGroup.iOS; break;
+                case "macos": target = BuildTarget.StandaloneOSX; group = BuildTargetGroup.Standalone; break;
+                case "linux": target = BuildTarget.StandaloneLinux64; group = BuildTargetGroup.Standalone; break;
+                case "webgl": target = BuildTarget.WebGL; group = BuildTargetGroup.WebGL; break;
+                default: target = BuildTarget.StandaloneWindows64; group = BuildTargetGroup.Standalone; break;
+            }
+            if (!BuildPipeline.IsBuildTargetSupported(group, target))
+            {
+                Errors.Add($"Unity build support for {platform} is not installed. Add the module in Unity Hub.");
+                WriteResult(false); return;
+            }
+            var appId = Arg("-agentAppId");
+            if (!string.IsNullOrEmpty(appId)) PlayerSettings.SetApplicationIdentifier(group, appId);
+            if (target == BuildTarget.Android)
+            {
+                EditorUserBuildSettings.buildAppBundle = outPath.EndsWith(".aab");
+                PlayerSettings.Android.targetArchitectures = AndroidArchitecture.ARM64;
+                PlayerSettings.SetScriptingBackend(group, ScriptingImplementation.IL2CPP);
+                // Secrets come from environment variables: Unity writes command-line arguments to its log.
+                var keystore = Environment.GetEnvironmentVariable("LF_ANDROID_KEYSTORE");
+                if (!string.IsNullOrEmpty(keystore))
+                {
+                    PlayerSettings.Android.useCustomKeystore = true;
+                    PlayerSettings.Android.keystoreName = keystore;
+                    PlayerSettings.Android.keystorePass = Environment.GetEnvironmentVariable("LF_ANDROID_KEYSTORE_PASS") ?? "";
+                    PlayerSettings.Android.keyaliasName = Environment.GetEnvironmentVariable("LF_ANDROID_KEY_ALIAS") ?? "";
+                    PlayerSettings.Android.keyaliasPass = Environment.GetEnvironmentVariable("LF_ANDROID_KEY_ALIAS_PASS") ?? "";
+                    Info.Add("android: release keystore configured");
+                }
+                else
+                {
+                    PlayerSettings.Android.useCustomKeystore = false;
+                    Info.Add("android: debug-signed (not for store upload)");
+                }
+            }
             var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
             {
                 scenes = scenes,
                 locationPathName = outPath,
-                target = BuildTarget.StandaloneWindows64,
+                target = target,
+                targetGroup = group,
                 options = BuildOptions.None,
             });
             bool ok = report.summary.result == BuildResult.Succeeded;

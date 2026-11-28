@@ -89,6 +89,12 @@ class SystemSpec(_Base):
 
 class AssetRequest(_Base):
     key: str = Field(description="unique snake_case id used by code, e.g. hero_character")
+    @field_validator("key")
+    @classmethod
+    def _safe_key(cls, value):
+        from .assets.safety import validate_key
+        return validate_key(value)
+
     kind: Literal["model", "hdri", "texture"] = "model"
     query: str = Field(description="short search query, e.g. 'wooden barrel'")
     alternatives: list[str] = Field(default_factory=list,

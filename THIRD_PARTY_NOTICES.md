@@ -16,3 +16,8 @@ are separate installations. Their product names and trademarks belong to their r
 Poly Haven and Sketchfab assets are downloaded during user runs, not bundled here. They retain their
 original licenses. LudoFabric records attribution in `Assets/ThirdParty/CREDITS.md`; verify source
 licenses and applicable attribution/share-alike requirements before redistribution.
+
+## Python runtime dependencies (installed via pip, not bundled)
+
+- LangGraph and langgraph-checkpoint-sqlite: MIT License (LangChain, Inc.). Their dependencies include the LangChain core and LangSmith SDK packages; LudoFabric does not require a LangSmith account or configure hosted tracing.
+- Pillow: MIT-CMU License.

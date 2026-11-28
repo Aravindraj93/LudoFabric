@@ -74,27 +74,51 @@ class Studio:
         self.llm = llm
         self.project = project
         self.ctx = ProjectContext(project, cfg.context_char_budget) if project else None
+        self.revision_context = ""
+        # Replaces the LudoFabric URP/SceneKit environment for projects not created by LudoFabric.
+        self.env_override: str | None = None
+        self.platform_note: str = ""  # target-platform constraints appended to specialist prompts
+        self.uses_assets: bool = False  # True when the project has downloaded free assets to place
 
     def attach(self, project: UnityProject) -> None:
         self.project = project
         self.ctx = ProjectContext(project, self.cfg.context_char_budget)
 
     # ---------------------------------------------------------------- director
-    def design(self, request: str) -> GameDesign:
+    def design(self, request: str, targets: list[str] | None = None) -> GameDesign:
+        from .platforms import design_brief
+        from .assets.manager import sources_note
         return self.llm.structured(
             GameDesign, model=self.cfg.model_orchestrator, instructions=prompts.DIRECTOR, name="director_design",
-            prompt=f"USER REQUEST:\n{request}\n\nInfer the full intent and produce the Game Design JSON.",
+            prompt=f"USER REQUEST:\n{request}{design_brief(targets) if targets else ''}\n\n"
+                   f"{self.revision_context}\n\n{sources_note(self.cfg)}\nRespect requests forbidding downloads. "
+                   "Infer the full intent and produce the Game Design JSON.",
         )
 
     # ---------------------------------------------------------------- tech lead
     def plan(self, design: GameDesign) -> Plan:
+        def validate_revision(plan):
+            if not self.revision_context:
+                return
+            if not plan.tasks:
+                raise ValueError("Revision plans require implementation tasks, not only a proposal.")
+            for task in plan.tasks:
+                if not task.outputs:
+                    raise ValueError(f"Revision task {task.id} must name Assets outputs. Host inspection, backup, copy and build are already handled; do not plan them as standalone tasks.")
+                for path in task.outputs:
+                    self.project.safe_path(path)
+        from .assets.manager import sources_note
+        assets_note = sources_note(self.cfg) if design.asset_policy != "procedural_only" else ""
         plan = self.llm.structured(
             Plan, model=self.cfg.model_orchestrator, instructions=prompts.TECH_LEAD, name="techlead_plan",
-            prompt=f"GAME DESIGN:\n{_design_summary(design)}\n\nProduce architecture, asset requests and task graph JSON.",
+            prompt=f"GAME DESIGN:\n{_design_summary(design)}{assets_note}\n\n{self.revision_context}\n\n"
+                   "Produce architecture, asset requests and task graph JSON.",
+            validate=validate_revision,
         )
         ids = {t.id for t in plan.tasks}
         for t in plan.tasks:  # drop dangling dependencies
             t.depends_on = [d for d in t.depends_on if d in ids and d != t.id]
+            t.status = "pending"
         if design.asset_policy == "procedural_only":
             plan.assets = []
         return plan
@@ -137,10 +161,14 @@ TASK TO BRIEF:
 {task.model_dump_json(indent=1)}
 
 Write the specialist brief JSON."""
+        if self.revision_context:
+            prompt += "\nHOST INSPECTION AND REVISION CONSTRAINTS:\n" + self.revision_context
         if self.cfg.brief_mode == "template" or (self.cfg.brief_mode == "auto" and contracts and len(task.outputs) <= 4):
             return Brief(prompt=prompt + "\nImplement the task directly; follow every contract and acceptance criterion.",
                          relevant_files=[p for p in needed if self.project.read_file(p) is not None])
-        result = self.llm.structured(Brief, model=self.cfg.model_orchestrator, instructions=prompts.PROMPT_ENGINEER,
+        # Briefing is a summarisation task: route to the optional light model when configured.
+        result = self.llm.structured(Brief, model=self.cfg.model_light or self.cfg.model_orchestrator,
+                                     instructions=prompts.PROMPT_ENGINEER,
                                      prompt=prompt, name=f"brief_{task.id}")
         result.relevant_files = list(dict.fromkeys(result.relevant_files +
             [p for p in needed if self.project.read_file(p) is not None]))
@@ -163,7 +191,18 @@ EXISTING FILE CONTENTS:
 {self.ctx.files(rels)}
 
 Return JSON: complete files for new code, or small exact-match patches to existing code, plus builder_methods and notes."""
-        system = prompts.SPECIALISTS.get(role, prompts.SPECIALISTS["gameplay"]) + prompts.UNITY_ENV
+        if self.revision_context:
+            prompt += "\nHOST INSPECTION AND REVISION CONSTRAINTS:\n" + self.revision_context
+        if self.env_override:
+            system = (f"You are the Unity {role} specialist modifying an existing project. Return AgentOutput JSON "
+                      "with files, exact-match patches, delete, builder_methods and notes. Preserve existing scenes "
+                      "and public APIs; do not recreate the game or invent missing packages.\n" + self.env_override)
+        else:
+            system = prompts.SPECIALISTS.get(role, prompts.SPECIALISTS["gameplay"]) + prompts.UNITY_ENV
+        system += self.platform_note
+        from .assets.manager import ASSET_ROLES, ASSET_USAGE, EXTERNAL_ASSET_USAGE
+        if self.uses_assets and role in ASSET_ROLES:
+            system += EXTERNAL_ASSET_USAGE if self.env_override else ASSET_USAGE
         return self.llm.structured(AgentOutput, model=self.cfg.model_coder, instructions=system, prompt=prompt,
                                    name=f"{role}_{task.id}", validate=lambda out: self._validate_output(out, before))
 
@@ -180,6 +219,8 @@ Return JSON: complete files for new code, or small exact-match patches to existi
             prepared[patch.path] = source.replace(patch.old, patch.new, 1)
         for path in set(prepared) | set(out.delete): self.project.safe_path(path)
         if set(prepared) & set(out.delete): raise ValueError("Do not both write and delete the same file.")
+        from .safety import check_files
+        check_files(prepared)  # strict mode: the violation text is sent back to the model for regeneration
 
     # ---------------------------------------------------------------- fixer
     def fix(self, error_text: str, hint_files: list[str] | None = None) -> AgentOutput:
@@ -197,7 +238,10 @@ INVOLVED FILES:
 {self.ctx.files(sorted(files))}
 
 Fix the diagnosed errors with the smallest supported change. Prefer exact-match patches over rewriting large existing files."""
-        return self.llm.structured(AgentOutput, model=self.cfg.model_coder, instructions=prompts.FIXER,
+        return self.llm.structured(AgentOutput, model=self.cfg.model_coder,
+                                   instructions=("Repair only the diagnosed Unity errors. Return AgentOutput JSON with "
+                                                 "small exact-match patches; preserve unrelated code.\n" + self.env_override
+                                                 if self.env_override else prompts.FIXER),
                                    prompt=prompt, name="fixer", validate=lambda out: self._validate_output(out, before))
 
     # ---------------------------------------------------------------- art director

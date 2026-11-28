@@ -70,6 +70,22 @@ input,select{width:100%;background:rgba(255,255,255,.04);color:var(--text);borde
 input:focus,select:focus{border-color:rgba(0,229,255,.6);box-shadow:0 0 0 3px rgba(0,229,255,.12)}
 select option{background:#0d0f20}
 
+/* platform chips: one horizontal row under the prompt */
+.platform-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;border-top:1px solid var(--line);padding:12px 0 6px}
+.plat-title{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);white-space:nowrap}
+.plats{display:flex;flex-wrap:wrap;gap:8px}
+.plat{position:relative;cursor:pointer;user-select:none}
+.plat input{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
+.plat span{display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border-radius:999px;font-size:13px;
+  border:1px solid var(--line);background:rgba(255,255,255,.03);color:var(--muted);transition:.2s}
+.plat:hover span{border-color:rgba(0,229,255,.45);color:var(--text)}
+.plat input:checked + span{color:#fff;border-color:rgba(0,229,255,.75);background:linear-gradient(135deg,rgba(0,229,255,.18),rgba(255,61,171,.16));box-shadow:0 0 12px rgba(0,229,255,.18)}
+.plat input:focus-visible + span{outline:2px solid var(--c2);outline-offset:2px}
+.plat.all span{border-style:dashed}
+.plat.warn span::after{content:"⚠";color:#ffb547;margin-left:2px}
+.plat-note{font-size:12px;line-height:1.45;color:var(--muted);padding:0 0 10px}
+.plat-note:empty{display:none}
+
 /* buttons */
 .btn{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:14px;padding:12px 20px;font:600 15px var(--font);color:#fff;cursor:pointer;
   background:rgba(255,255,255,.05);transition:transform .2s,box-shadow .3s,border-color .3s;white-space:nowrap}
@@ -110,6 +126,8 @@ h3{margin:0 0 14px;font-size:16px;font-weight:700} h3 small{color:var(--muted);f
 /* status orb */
 .status{display:flex;align-items:center;gap:12px;color:var(--muted);font-size:14px}
 .status b{color:#fff}
+#recentProjects{width:100%;min-width:0;max-width:100%;text-overflow:ellipsis}
+#jobText{min-width:0;overflow-wrap:anywhere}
 .status-orb{width:16px;height:16px;border-radius:50%;background:#3a3f5c;box-shadow:0 0 0 4px rgba(255,255,255,.04);flex:0 0 16px}
 .status-orb.run{background:conic-gradient(from var(--a),var(--c1),var(--c2),var(--c3),var(--c1));animation:spin 1.2s linear infinite;box-shadow:0 0 18px var(--c2),0 0 40px var(--c1)}
 .status-orb.err{background:var(--bad);box-shadow:0 0 14px var(--bad)}
@@ -350,9 +368,28 @@ footer span{color:#cfd3ff}
         <div class="field"><label>Model override (all roles, this job)</label><input id="jobModel" list="modelList" placeholder="default / saved role models"></div>
         <button class="btn sm" onclick="testModel('jobModel',this)">Test model override</button>
         <div class="field"><label>Project name</label><input id="pname" placeholder="auto from description"></div>
+        <div class="field"><label>Source project (optional revision)</label><input id="revisionSource" placeholder="C:\UnityProjects\ExistingGame"></div>
         <button class="btn" data-job onclick="startJob('design')">&#10022; Design &amp; plan</button>
         <button class="btn primary" data-job onclick="startJob('build')">&#9654; Build the full game</button>
-        <button class="btn" data-job onclick="openProjectPath()">Open saved project</button>
+        <button class="btn" data-job onclick="openProjectPath()">Open project by path</button>
+      </div>
+      <div class="platform-row" style="margin-top:12px">
+        <span class="plat-title">Build for</span>
+        <div id="platforms" class="plats">
+          <label class="plat"><input type="checkbox" value="windows" checked><span>🖥️ Windows</span></label>
+          <label class="plat"><input type="checkbox" value="android"><span>🤖 Android</span></label>
+          <label class="plat"><input type="checkbox" value="ios"><span>📱 iOS</span></label>
+          <label class="plat"><input type="checkbox" value="macos"><span>🍎 macOS</span></label>
+          <label class="plat"><input type="checkbox" value="linux"><span>🐧 Linux</span></label>
+          <label class="plat"><input type="checkbox" value="webgl"><span>🌐 WebGL</span></label>
+          <label class="plat all"><input type="checkbox" id="platAll"><span>All</span></label>
+        </div>
+      </div>
+      <div id="platformNote" class="plat-note"></div>
+      <div class="controls">
+        <div class="field" style="flex:1;min-width:240px"><label>Recent projects · select to open</label>
+          <select id="recentProjects" data-job onchange="openRecentProject(this.value)"><option value="">Choose a saved project</option></select>
+        </div>
       </div>
     </div></div>
     <div class="chips" id="chips"></div>
@@ -450,8 +487,9 @@ footer span{color:#cfd3ff}
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const SESSION_TOKEN = (document.querySelector('meta[name="lf-token"]') || {}).content || "";
 async function api(path, opts = {}) {
-  const r = await fetch(path, {headers: {"Content-Type": "application/json"}, ...opts});
+  const r = await fetch(path, {...opts, headers: {"Content-Type": "application/json", "X-LudoFabric-Token": SESSION_TOKEN, ...(opts.headers || {})}});
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.detail || r.statusText);
   return j;
@@ -824,6 +862,7 @@ async function provAct(id, action, btn) {
 }
 async function loadSettings() {
   settings = await api("/api/settings");
+  renderPlatformNotes();
   $("unity").value = settings.unity_editor || ""; $("root").value = settings.projects_root;
   $("effort").value = settings.codex_reasoning || ""; $("polish").value = settings.polish_rounds;
   $("briefMode").value = settings.brief_mode || "auto"; $("maxCalls").value = settings.max_llm_calls || 0; $("maxSeconds").value = settings.max_job_seconds || 0;
@@ -853,15 +892,72 @@ async function saveSettings() {
 
 /* ===== Jobs & projects ===== */
 let selected = null, wasRunning = false, detailKey = "", startingJob = false;
+async function openRecentProject(name) {
+  if (!name) return;
+  try {
+    await showProject(name);
+    $("detail").scrollIntoView({behavior:"smooth"});
+  } catch(e) { toast(e.message,"bad"); }
+}
 async function openProjectPath() {
-  const path = window.prompt("Full Unity project folder path (keep its adjacent .agent folder):");
+  const path = window.prompt("Full Unity project folder path (a LudoFabric game, or any Unity project made elsewhere):");
   if (!path) return;
   try {
     const r = await api("/api/projects/import", {method:"POST", body:JSON.stringify({path})});
     selected = r.project; detailKey = "";
     await loadProjects(); await showProject(selected);
-    toast("Checkpoint opened. Use Continue planning or Resume to continue.", "ok");
+    toast("Project opened. Resume it, or request a change.", "ok");
   } catch (e) { toast(e.message, "bad"); }
+}
+async function improveProject(name) {
+  try {
+    const d = await api(`/api/projects/${name}`);
+    $("revisionSource").value = d.unity_project;
+    $("pname").value = `${name}_Revision_${Date.now()}`;
+    $("prompt").value = "Improve the existing game. Preserve gameplay, levels, controls and saved progress. Changes requested: ";
+    $("prompt").scrollIntoView({behavior:"smooth"});
+    $("prompt").focus();
+    toast("Describe your changes, then choose Design & plan to review the revision.", "ok");
+  } catch(e) { toast(e.message, "bad"); }
+}
+function selectedTargets() {
+  const t = [...document.querySelectorAll("#platforms input[value]:checked")].map(c => c.value);
+  return t.length ? t : ["windows"];
+}
+function renderPlatformNotes() {
+  const ps = (typeof settings !== "undefined" && settings && settings.platform_support) || {};
+  const boxes = [...document.querySelectorAll("#platforms input[value]")];
+  boxes.forEach(c => c.closest(".plat").classList.toggle("warn", !!(ps[c.value] && ps[c.value].installed === false)));
+  $("platAll").checked = boxes.every(c => c.checked);
+  const notes = selectedTargets().map(t => ps[t]).filter(Boolean).flatMap(v => [
+    v.installed === false ? `⚠️ <b>${esc(v.label)}</b>: build module not installed for this Unity Editor (Unity Hub → Installs → Add modules).` : "",
+    v.note ? `<b>${esc(v.label)}</b>: ${esc(v.note)}` : ""]).filter(Boolean);
+  $("platformNote").innerHTML = notes.join("<br>");
+}
+document.addEventListener("change", e => {
+  if (e.target.id === "platAll") document.querySelectorAll("#platforms input[value]").forEach(c => { c.checked = e.target.checked; });
+  if (e.target.id === "platAll" || (e.target.closest && e.target.closest("#platforms"))) {
+    if (!document.querySelector("#platforms input[value]:checked")) document.querySelector('#platforms input[value="windows"]').checked = true;
+    renderPlatformNotes();
+  }
+});
+async function startChange(name) {
+  const request = ($("changeReq") || {}).value?.trim();
+  if (!request) { toast("Describe the change first ✍️", "bad"); return; }
+  try {
+    document.querySelectorAll("[data-job]").forEach(b => { b.disabled = true; });
+    await api("/api/jobs", {method: "POST", body: JSON.stringify({request, project: name, provider: $("provider").value,
+      mode: "change", targets: null, model: $("jobModel").value.trim() || null, model_orchestrator: $("modelOrchestrator").value.trim(),
+      model_coder: $("modelCoder").value.trim(), model_vision: $("modelVision").value.trim()})});
+    selected = name; detailKey = ""; liveRunning = true;
+    toast(`Applying change to "${name}"...`, "ok");
+    pollJob();
+  } catch (e) { toast(e.message, "bad"); pollJob(); }
+}
+async function rollbackChange(name, id) {
+  if (!confirm(`Restore the files changed by ${id}?`)) return;
+  try { await api(`/api/projects/${name}/changes/${id}/rollback`, {method: "POST"}); detailKey = ""; toast(`${id} rolled back`, "ok"); showProject(name); }
+  catch (e) { toast(e.message, "bad"); }
 }
 async function startJob(mode, project = null) {
   if (startingJob) return;
@@ -873,7 +969,8 @@ async function startJob(mode, project = null) {
     document.querySelectorAll("[data-job]").forEach(b => { b.disabled = true; });
     toast("Checking selected model access before starting...", "ok");
     const r = await api("/api/jobs", {method: "POST", body: JSON.stringify({request, project: project || $("pname").value.trim() || null,
-      provider: $("provider").value, mode, model:$("jobModel").value.trim() || null,
+      source_project:project ? null : $("revisionSource").value.trim() || null,
+      provider: $("provider").value, mode, model:$("jobModel").value.trim() || null, targets: selectedTargets(),
       model_orchestrator:$("modelOrchestrator").value.trim(), model_coder:$("modelCoder").value.trim(),
       model_vision:$("modelVision").value.trim()})});
     selected = r.project; detailKey = ""; liveRunning = true; setStage(0, 0);
@@ -883,20 +980,29 @@ async function startJob(mode, project = null) {
   } catch (e) { toast(e.message, "bad"); }
   finally { startingJob = false; pollJob(); }
 }
+async function dismissJobNotice() {
+  try {
+    await api("/api/jobs/dismiss", {method:"POST"});
+    await pollJob();
+  } catch(e) { toast(e.message, "bad"); }
+}
 async function pollJob() {
   let j; try { j = await api("/api/jobs/current"); } catch { syncOffice({running:false, offline:true}); $("navStatus").textContent = "server offline"; $("navOrb").className = "status-orb err"; return; }
   const running = j.running; liveRunning = running;
-  syncOffice({ running, offline: false, project: j.project, error: j.error });
+  const notice = !j.notice_dismissed;
+  syncOffice({ running, offline: false, project: j.project, error: notice ? j.error : null });
   BG.target = running ? 1 : .6; FX.setEnergy(running ? 1.1 : .6);
   document.body.classList.toggle("busy", running);
-  const orbCls = "status-orb" + (running ? " run" : j.error ? " err" : j.project ? " ok" : "");
-  $("orb").className = orbCls; $("navOrb").className = orbCls;
+  const orbCls = "status-orb" + (running ? " run" : notice && j.error ? " err" : "");
+  $("orb").className = orbCls;
+  $("navOrb").className = "status-orb" + (running ? " run" : "");
   const mins = j.started ? Math.max(0, Math.round((Date.now() / 1000 - j.started) / 60)) : 0;
   $("jobText").innerHTML = running ? `AI is working on <b>${esc(j.project)}</b> · ${esc(j.mode)} · ${esc(j.provider)} · ${mins} min`
+    : !notice ? "idle, ready for your next job"
     : j.state === "waiting_for_limit" ? `Usage limit reached. Progress saved. Resume after your allowance resets.${j.retry_at ? ' Suggested retry: ' + esc(new Date(j.retry_at * 1000).toLocaleString()) : ''}`
     : j.state === "budget_paused" ? `AI budget reached. Progress saved. Resume to start a new budget.`
     : j.state === "interrupted" ? `Interrupted: <b>${esc(j.project)}</b>. Select this project and Resume.`
-    : j.error ? `<span style="color:var(--bad)">Last job failed:</span> ${esc(j.error.split("\n")[0].slice(0, 140))}`
+    : j.error ? `<span style="color:var(--bad)">Previous job ${esc(j.project || "")} failed${j.started ? ' (' + esc(new Date(j.started * 1000).toLocaleString()) + ')' : ''}:</span> ${esc(j.error.split("\n")[0].slice(0, 140))} <button class="btn sm" onclick="dismissJobNotice()">Dismiss</button>`
     : j.project ? `Finished <b>${esc(j.project)}</b>` : "idle, ready for your idea";
   $("navStatus").textContent = running ? `building ${j.project}...` : "studio ready";
   document.querySelectorAll("[data-job]").forEach(b => { b.disabled = running || startingJob; });
@@ -906,35 +1012,48 @@ async function pollJob() {
     detailKey = "";
   }
   wasRunning = running;
-  if (!selected && j.project) selected = j.project;
+  if (!selected && running && j.project) selected = j.project;
   await loadProjects();
   if (selected) showProject(selected, true);
 }
 async function loadProjects() {
   let list; try { list = await api("/api/projects"); } catch { return; }
   if (!selected && list.length) selected = list[0].name;
+  const options = '<option value="">Choose a saved project</option>' + list.map(p =>
+    `<option value="${esc(p.name)}" ${p.available === false ? "disabled" : ""}>${esc(p.title || p.name)} — ${esc(p.path || p.name)}${p.available === false ? " (folder missing)" : ""}</option>`).join("");
+  if ($("recentProjects").innerHTML !== options) $("recentProjects").innerHTML = options;
+  $("recentProjects").value = selected || "";
   $("projects").innerHTML = list.length ? list.map(p => `<div class="p ${p.name === selected ? "sel" : ""}" onclick="showProject('${esc(p.name)}')">
-      <div class="t"><div><b>${esc(p.title || p.name)}</b></div><div class="hint">${esc(p.request)}</div></div>
+      <div class="t"><div><b>${esc(p.title || p.name)}</b></div><div class="hint">${esc(p.path || "")}</div><div class="hint">${esc(p.request)}</div></div>
       <span class="pill ${p.phase === "shipped" ? "ok" : ""}">${esc(p.phase)}</span></div>`).join("")
     : '<span class="muted">No projects yet. Describe a game above ✨</span>';
 }
 async function showProject(name, quiet = false) {
+  if (!quiet) {
+    try { await api(`/api/projects/${name}/open`, {method:"POST"}); }
+    catch(e) { toast(e.message,"bad"); return; }
+  }
   if (selected !== name) { selected = name; detailKey = ""; loadProjects(); }
   let d; try { d = await api(`/api/projects/${name}`); } catch { return; }
-  const s = d.state, g = s.design, plan = s.plan;
+  const s = d.state, plan = s.plan, external = s.origin === "external", pr = s.profile || {};
+  if (!quiet) { document.querySelectorAll("#platforms input[value]").forEach(c => { c.checked = (s.targets || ["windows"]).includes(c.value); }); renderPlatformNotes(); }
+  const g = s.design || (external ? {title: name, genre: "Existing Unity project",
+    pitch: `Unity ${pr.unity_version || "?"} · ${(pr.render_pipeline || "?").toUpperCase()} · input: ${pr.input || "?"} · ${pr.scripts ?? "?"} scripts · ${(pr.scenes || []).length} scenes`} : null);
   if (!wasRunning && !liveRunning) setStage(PHASE_DONE[s.phase] ?? 0, -1);
   const key = JSON.stringify([name, s.phase, plan && plan.tasks.map(t => t.status), d.screenshots.length,
-                              (s.reviews || []).length, wasRunning, !!d.report, d.metrics]);
+                              (s.reviews || []).length, wasRunning, !!d.report, d.metrics, (s.changes || []).map(c => c.status)]);
   if (quiet && key === detailKey) return;
   detailKey = key;
   if (!g) { $("detail").style.display = "none"; return; }
   let docs = []; try { docs = await api(`/api/projects/${name}/docs`); } catch {}
   const dis = wasRunning ? "disabled" : "";
-  const next = (s.phase === "new" || s.phase === "designed")
+  const canChange = external || ["built", "polished", "shipped"].includes(s.phase);
+  const next = external ? `<span class="pill">opened by path</span>`
+    : (s.phase === "new" || s.phase === "designed")
       ? `<button class="btn primary" data-job ${dis} onclick="startJob('design','${name}')">&#8635; Continue planning</button>`
     : s.phase === "planned" ? `<button class="btn primary" data-job ${dis} onclick="startJob('build','${name}')">&#9654; Build in Unity</button>`
     : s.phase !== "shipped" ? `<button class="btn" data-job ${dis} onclick="startJob('build','${name}')">&#8635; Resume</button>`
-    : `<span class="pill ok">shipped 🚀</span>`;
+    : `<button class="btn primary" data-job ${dis} onclick="improveProject('${name}')">Improve this game</button>`;
   const total = plan ? plan.tasks.length : 0, done = plan ? plan.tasks.filter(t => t.status === "done").length : 0;
   const pct = total ? Math.round(done / total * 100) : 0;
   const kb = n => n < 1024 ? n + " B" : (n / 1024).toFixed(1) + " KB";
@@ -963,6 +1082,19 @@ async function showProject(name, quiet = false) {
     </div>
     ${plan ? `<div class="prog-wrap"><div class="prog-label"><span>Production progress</span><span>${done}/${total} tasks · ${pct}%</span></div>
       <div class="prog"><i style="width:${pct}%"></i></div></div>` : ""}
+    ${!external ? `<div class="subhead">Platforms: ${esc((s.targets || ["windows"]).join(", "))}</div>
+      ${Object.entries((s.evidence || {}).builds || {}).map(([t, b]) => `<div class="hint">${b.ok ? "✅" : "⚠️"} <b>${esc(t)}</b> · ${esc(b.status || "")}
+        ${b.artifact ? " · " + esc(b.artifact) : ""}${b.note ? " · " + esc(b.note.slice(0, 220)) : ""}</div>`).join("")}
+      ${["polished", "shipped"].includes(s.phase) ? `<button class="btn sm" data-job ${dis} onclick="startJob('build','${esc(name)}')">&#9654; Build for platforms ticked above</button>` : ""}` : ""}
+    ${canChange ? `<div class="subhead">Request a change or upgrade</div>
+      <textarea id="changeReq" rows="3" style="width:100%" placeholder="e.g. Add a double jump with a dust effect, and show the best time on the win screen"></textarea>
+      <div style="margin-top:8px"><button class="btn primary" data-job ${dis} onclick="startChange('${esc(name)}')">&#10022; Apply change</button>
+      <span class="hint">Planned against the existing code, backed up first, then compiled/tested when Unity is configured.</span></div>
+      ${(s.changes || []).slice().reverse().map(c => `<div class="card" style="margin-top:8px"><b>${esc(c.id)} · ${esc(c.status)}</b>
+        <div>${esc(c.request)}</div>${c.summary ? `<div class="hint">${esc(c.summary)}</div>` : ""}
+        ${c.verification && c.verification.note ? `<div class="hint">${esc(c.verification.note)}</div>` : ""}
+        ${c.error ? `<div class="hint" style="color:var(--bad)">${esc(c.error.split("\n")[0].slice(0, 200))}</div>` : ""}
+        ${c.status !== "rolled_back" ? `<button class="btn sm" data-job ${dis} onclick="rollbackChange('${esc(name)}','${esc(c.id)}')">&#8634; Roll back</button>` : ""}</div>`).join("")}` : ""}
     <div class="subhead docs-head"><span>Documents · open here, or download to instruct any AI model</span>
       ${docs.length ? `<a class="btn sm" href="/api/projects/${name}/docs.zip">&#11015; Download all (.zip)</a>` : ""}</div>
     <div class="docs">${docCards || '<span class="muted">No documents yet.</span>'}</div>

@@ -125,22 +125,22 @@ class UnityProject:
         self._configure_packages()
         return manifest.read_bytes() != before
 
-    def install_bridge(self) -> None:
+    def install_bridge(self, *, preserve_starter: bool = False) -> None:
         dst = self.path / BRIDGE_DST
         dst.mkdir(parents=True, exist_ok=True)
         for f in BRIDGE_SRC.iterdir():
             if f.is_file():
                 shutil.copy2(f, dst / f.name)
-        self.install_starter()
+        self.install_starter(overwrite=not preserve_starter)
 
-    def install_starter(self) -> None:
+    def install_starter(self, *, overwrite: bool = True) -> None:
         """Reusable, independently compiled campaign data/progress foundation."""
         dst = self.path / "Assets/LudoFabricStarter/Runtime"
         dst.mkdir(parents=True, exist_ok=True)
         for source in STARTER_SRC.iterdir():
             if source.is_file():
                 target = dst / source.name
-                if not target.exists() or target.read_bytes() != source.read_bytes():
+                if not target.exists() or (overwrite and target.read_bytes() != source.read_bytes()):
                     shutil.copy2(source, target)
 
     # ------------------------------------------------------------------ file ops
@@ -251,11 +251,14 @@ class UnityProject:
                               extra={"-agentOut": str(out_dir)})
         return res, sorted(out_dir.glob("*.png"))
 
-    def build(self, exe: Path) -> UnityResult:
+    def build(self, exe: Path, platform: str = "windows", app_id: str | None = None) -> UnityResult:
+        from ..platforms import PLATFORMS
         exe.parent.mkdir(parents=True, exist_ok=True)
-        return self.runner.run(self._pp() + ["-buildTarget", "Win64"], "build", nographics=False,
-                               method="GameAgent.Bridge.AgentBridge.Build",
-                               extra={"-agentBuildPath": str(exe)})
+        extra = {"-agentBuildPath": str(exe), "-agentPlatform": platform}
+        if app_id:
+            extra["-agentAppId"] = app_id
+        return self.runner.run(self._pp() + ["-buildTarget", PLATFORMS[platform].build_target], f"build_{platform}",
+                               nographics=False, method="GameAgent.Bridge.AgentBridge.Build", extra=extra)
 
     def run_tests(self, platform: str, test_filter: str | None = None) -> tuple[bool, str]:
         results = self.state_dir / "unity_logs" / f"tests_{platform}.xml"
@@ -277,7 +280,13 @@ class UnityProject:
             return False, "\n".join(f"{c.get('fullname', c.get('name'))}: {c.findtext('failure/message', '')[:800]}" for c in failed)
         if not run.ok or xml.get("result") == "Failed" or not cases:
             return False, "Unity tests did not complete successfully. " + run.error_text()
-        return True, f"{len(cases)} tests reported; {sum(c.get('result') == 'Passed' for c in cases)} passed"
+        passed = sum(c.get("result") == "Passed" for c in cases)
+        if not passed:
+            return False, "Unity reported zero passed tests; skipped/inconclusive tests are not verification."
+        unexpected = [c for c in cases if c.get("result") not in ("Passed", "Skipped")]
+        if unexpected:
+            return False, "Unity reported inconclusive or incomplete test cases."
+        return True, f"{len(cases)} tests reported; {passed} passed"
 
     def smoke_run(self, exe: Path, seconds: int = 25) -> tuple[bool, str]:
         """Launches the built player windowed for a few seconds and scans its log for runtime exceptions."""
@@ -286,10 +295,18 @@ class UnityProject:
             log.unlink()
         proc = subprocess.Popen([str(exe), "-screen-fullscreen", "0", "-screen-width", "1280",
                                  "-screen-height", "720", "-logFile", str(log)])
-        time.sleep(seconds)
-        proc.kill()
-        time.sleep(1)
+        try:
+            time.sleep(seconds)
+            early_exit = proc.poll()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=10)
         text = log.read_text(encoding="utf-8", errors="replace") if log.exists() else ""
+        if early_exit is not None:
+            return False, f"Player exited before the smoke observation finished (exit code {early_exit})."
+        if not text.strip():
+            return False, "Player produced no readable smoke log; runtime health is unverified."
         blocks, lines = [], text.splitlines()
         for i, line in enumerate(lines):
             if re.search(r"\w+Exception\b|Error:|MissingReference|is missing", line) and "Fallback handler" not in line:

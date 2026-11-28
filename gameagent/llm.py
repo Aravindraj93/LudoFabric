@@ -36,6 +36,10 @@ class BudgetReached(FatalLLMError):
     pass
 
 
+class JobCancelled(FatalLLMError):
+    """User requested cancellation (<project>.agent/CANCEL). State is saved; resume continues."""
+
+
 class UsageLimitReached(FatalLLMError):
     """A resumable pause, rather than a failed production task."""
     def __init__(self, message: str, retry_at: float):
@@ -264,8 +268,23 @@ class LLM:
             f"# {name}\n\n## System\n\n{instructions}\n\n## Prompt\n\n{prompt}\n\n## Output\n\n{output}\n",
             encoding="utf-8")
 
+    def _check_project_budget(self, metrics, pending, name, key, request) -> None:
+        """Token/cost limits measured from reported usage; persisted so restarts cannot reset them."""
+        if not metrics or not (self.cfg.max_project_tokens or self.cfg.max_project_cost_usd):
+            return
+        from .metrics import load_events, usage_totals
+        totals = usage_totals(load_events(metrics))
+        used = totals["tokens"]["input"] + totals["tokens"]["output"]
+        cost = totals["estimated_cost_usd"] or 0.0
+        if ((self.cfg.max_project_tokens and used >= self.cfg.max_project_tokens) or
+                (self.cfg.max_project_cost_usd and cost >= self.cfg.max_project_cost_usd)):
+            if pending:
+                atomic_json(pending, dict(name=name, key=key, status="budget_paused", request=request))
+            raise BudgetReached(f"Project token/cost budget reached ({used} tokens, ${cost:.4f}). "
+                                "Progress saved; raise MAX_PROJECT_TOKENS / MAX_PROJECT_COST_USD and resume.")
+
     def complete(self, *, model: str, instructions: str, prompt: str, images: list[Path] | None = None,
-                 json_mode: bool = False, name: str = "call", retries: int = 4) -> str:
+                 json_mode: bool = False, name: str = "call", retries: int = 4, retry_of: str | None = None) -> str:
         # Cache exact requests so a restart after receiving an answer need not spend tokens again.
         image_paths = [Path(p).resolve() for p in (images or [])]
         request = dict(backend=self.cfg.llm_backend, model=model, instructions=instructions,
@@ -284,6 +303,9 @@ class LLM:
         delay, waited_for_limit, attempt = 10.0, 0, 0
         label = model or f"{self.cfg.llm_backend} default model"
         while True:
+            if self.log_dir and (self.log_dir.parent / "CANCEL").exists():
+                raise JobCancelled("Job cancelled by user before the next AI request. Progress saved; resume to continue.")
+            self._check_project_budget(metrics, pending, name, key, request)
             if ((self.cfg.max_llm_calls > 0 and self._requests >= self.cfg.max_llm_calls) or
                 (self.cfg.max_job_seconds > 0 and time.monotonic() - self._started >= self.cfg.max_job_seconds)):
                 if pending:
@@ -300,7 +322,7 @@ class LLM:
                 self._log(name, instructions, prompt, out)
                 record(metrics, kind="llm", name=name, status="ok", model=model,
                        seconds=round(time.monotonic() - started, 3), input_characters=len(instructions) + len(prompt),
-                       output_characters=len(out), backend=self.cfg.llm_backend,
+                       output_characters=len(out), backend=self.cfg.llm_backend, retry=attempt > 1 or retry_of is not None,
                        usage=getattr(self.backend, "last_usage", None) if isinstance(getattr(self.backend, "last_usage", None), dict) else None)
                 if cache:
                     atomic_json(cache, {"output": out})
@@ -353,7 +375,7 @@ class LLM:
             p = full_prompt if not last_err else (
                 f"{full_prompt}\n\nYour previous answer was invalid: {last_err}\nReturn corrected JSON only.")
             raw = self.complete(model=model, instructions=instructions, prompt=p, images=images,
-                                json_mode=True, name=name)
+                                json_mode=True, name=name, retry_of=name if attempt > 1 else None)
             try:
                 result = schema.model_validate(_extract_json(raw))
                 if validate: validate(result)

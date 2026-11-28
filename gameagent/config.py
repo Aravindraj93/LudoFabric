@@ -62,9 +62,19 @@ class Config:
     brief_mode: str = field(default_factory=lambda: _env("BRIEF_MODE", "auto").lower())
     max_llm_calls: int = field(default_factory=lambda: max(0, _int("MAX_LLM_CALLS", 0)))
     max_job_seconds: int = field(default_factory=lambda: max(0, _int("MAX_JOB_SECONDS", 0)))
+    # Project-wide limits survive restarts (computed from <project>.agent/metrics.jsonl). 0 = unlimited.
+    max_project_tokens: int = field(default_factory=lambda: max(0, _int("MAX_PROJECT_TOKENS", 0)))
+    max_project_cost_usd: float = field(default_factory=lambda: max(0.0, float(_env("MAX_PROJECT_COST_USD", "0") or 0)))
+    # Optional cheaper model for low-complexity calls (briefs). Empty = use MODEL_ORCHESTRATOR.
+    model_light: str = field(default_factory=lambda: _env("MODEL_LIGHT"))
+    # Orchestration engine: graph (LangGraph, SQLite checkpoints) | legacy (sequential) | auto
+    engine: str = field(default_factory=lambda: _env("ORCHESTRATOR_ENGINE", "auto").lower())
+    max_phase_retries: int = field(default_factory=lambda: max(1, _int("MAX_PHASE_RETRIES", 2)))
 
     def validate(self, need_unity: bool = True) -> None:
         errors = []
+        if self.engine not in ('auto', 'graph', 'legacy'):
+            errors.append('ORCHESTRATOR_ENGINE must be auto, graph or legacy')
         if self.brief_mode not in ("auto", "template", "ai"):
             errors.append("BRIEF_MODE must be auto, template or ai")
         if self.llm_backend == "codex":

@@ -3,14 +3,20 @@ Requires a free API token: https://sketchfab.com/settings/password
 """
 from __future__ import annotations
 
+import os
 import zipfile
 from pathlib import Path
 
 import httpx
+from .safety import Budget, contained, download, extract
 
 API = "https://api.sketchfab.com/v3"
-# Licenses safe for commercial use when attribution is given (CREDITS.md is generated automatically).
-ALLOWED_LICENSES = {"cc0", "by", "by-sa"}
+# ShareAlike requires additional obligations, not just attribution.
+ALLOWED_LICENSES = {"cc0", "by"}
+
+
+def allowed_licenses() -> set[str]:
+    return ALLOWED_LICENSES | ({"by-sa"} if os.getenv("ALLOW_SHAREALIKE_ASSETS", "0") == "1" else set())
 
 
 def _license_slug(lic: dict | None) -> str:
@@ -60,7 +66,7 @@ class Sketchfab:
         results = []
         for m in r.json().get("results", []):
             slug = _license_slug(m.get("license"))
-            if slug and slug not in ALLOWED_LICENSES:
+            if slug not in allowed_licenses():
                 continue
             results.append(m)
             if len(results) >= limit:
@@ -73,9 +79,10 @@ class Sketchfab:
         return r.json()
 
     def download(self, uid: str, dest_dir: Path) -> tuple[Path, dict]:
+        self._budget = Budget()
         info = self.model_info(uid)
         slug = _license_slug(info.get("license"))
-        if slug not in ALLOWED_LICENSES:
+        if slug not in allowed_licenses():
             raise RuntimeError(f"license '{slug}' not allowed")
         r = self.client.get(f"{API}/models/{uid}/download", headers=self._headers())
         r.raise_for_status()
@@ -88,17 +95,12 @@ class Sketchfab:
             "animations": info.get("animationCount", 0),
         }
         if "glb" in links:
-            main = dest_dir / "model.glb"
+            main = contained(dest_dir, "model.glb")
             self._stream(links["glb"]["url"], main)
             return main, extra
-        archive = dest_dir / "model.zip"
+        archive = contained(dest_dir, "model.zip")
         self._stream(links["gltf"]["url"], archive)
-        with zipfile.ZipFile(archive) as z:
-            for member in z.namelist():  # zip-slip protection
-                target = (dest_dir / member).resolve()
-                if not str(target).startswith(str(dest_dir.resolve())):
-                    raise RuntimeError("unsafe path in archive")
-            z.extractall(dest_dir)
+        extract(archive, dest_dir, Budget())
         archive.unlink()
         gltfs = sorted(dest_dir.rglob("*.gltf"))
         if not gltfs:
@@ -106,9 +108,5 @@ class Sketchfab:
         return gltfs[0], extra
 
     def _stream(self, url: str, dest: Path) -> None:
-        with self.client.stream("GET", url, follow_redirects=True) as r:
-            r.raise_for_status()
-            with dest.open("wb") as f:
-                for chunk in r.iter_bytes():
-                    f.write(chunk)
+        download(self.client, url, dest, self._budget)
 

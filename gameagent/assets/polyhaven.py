@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import httpx
+from .safety import Budget, contained, download, url_name
 
 API = "https://api.polyhaven.com"
 HEADERS = {"User-Agent": "LudoFabric-UnityOrchestrator/0.1 (autonomous game dev tool)"}
@@ -70,12 +71,7 @@ class PolyHaven:
         return scored[:limit]
 
     def _download(self, url: str, dest: Path) -> None:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with self.client.stream("GET", url, headers=HEADERS, follow_redirects=True) as r:
-            r.raise_for_status()
-            with dest.open("wb") as f:
-                for chunk in r.iter_bytes():
-                    f.write(chunk)
+        download(self.client, url, dest, self._budget, HEADERS)
 
     @staticmethod
     def _pick_res(options: dict, wanted: str) -> str:
@@ -86,6 +82,7 @@ class PolyHaven:
         return next(iter(options))
 
     def download(self, kind: str, asset_id: str, dest_dir: Path, resolution: str) -> tuple[Path, dict]:
+        self._budget = Budget()
         r = self.client.get(f"{API}/files/{asset_id}", headers=HEADERS)
         r.raise_for_status()
         files = r.json()
@@ -95,16 +92,17 @@ class PolyHaven:
         if kind == "model":
             gl = files["gltf"]
             entry = gl[self._pick_res(gl, resolution)]["gltf"]
-            main = dest_dir / Path(entry["url"]).name
+            main = contained(dest_dir, url_name(entry["url"]))
+            includes = [(contained(dest_dir, rel), inc) for rel, inc in entry.get("include", {}).items()]
             self._download(entry["url"], main)
-            for rel, inc in entry.get("include", {}).items():
-                self._download(inc["url"], dest_dir / rel)
+            for target, inc in includes:
+                self._download(inc["url"], target)
             return main, extra
 
         if kind == "hdri":
             h = files["hdri"]
             entry = h[self._pick_res(h, resolution)]["hdr"]
-            main = dest_dir / Path(entry["url"]).name
+            main = contained(dest_dir, url_name(entry["url"]))
             self._download(entry["url"], main)
             return main, extra
 
@@ -117,7 +115,7 @@ class PolyHaven:
             fmt = files[map_key][res].get("jpg") or files[map_key][res].get("png")
             if not fmt:
                 continue
-            p = dest_dir / Path(fmt["url"]).name
+            p = contained(dest_dir, url_name(fmt["url"]))
             self._download(fmt["url"], p)
             maps[label] = p
         if "albedo" not in maps:

@@ -13,6 +13,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
+from typing import Literal
 
 from dotenv import set_key
 from fastapi import FastAPI, HTTPException
@@ -36,6 +37,24 @@ def registered_projects() -> dict:
     return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
+_recent_lock = threading.Lock()
+
+
+def recent_projects() -> list[dict]:
+    path = STUDIO_DIR / 'recent_projects.json'
+    if not path.exists(): return []
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
+def remember_project(name: str, path: Path) -> None:
+    resolved = str(path.resolve())
+    key = os.path.normcase(resolved)
+    with _recent_lock:
+        entries = [p for p in recent_projects() if os.path.normcase(p['path']) != key]
+        entries.insert(0, {'name': name, 'path': resolved, 'opened': time.time()})
+        atomic_json(STUDIO_DIR / 'recent_projects.json', entries[:20])
+
+
 def project_path(name: str) -> Path:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise HTTPException(400, "bad project name")
@@ -47,6 +66,36 @@ def state_path(path: Path) -> Path:
 
 app = FastAPI(title="LudoFabric Studio")
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
+
+# ----------------------------------------------------------------------------- local-only request protection
+# A random per-process token is embedded in the page this server serves. Other websites open in the same browser
+# cannot read it (same-origin policy), so they cannot start jobs, change settings or log providers out (CSRF).
+# The Host check blocks DNS-rebinding; the Origin check blocks cross-site requests.
+import hmac
+import secrets
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+SESSION_TOKEN = os.getenv("LF_SESSION_TOKEN") or secrets.token_urlsafe(32)
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
+
+
+def _host_of(value: str) -> str:
+    value = re.sub(r"^https?://", "", value or "").split("/")[0]
+    return value.rsplit(":", 1)[0] if not value.startswith("[") else value.split("]")[0] + "]"
+
+
+@app.middleware("http")
+async def local_only(request: Request, call_next):
+    if _host_of(request.headers.get("host", "")) not in LOCAL_HOSTS:
+        return JSONResponse({"detail": "LudoFabric Studio only accepts requests addressed to localhost."}, 403)
+    origin = request.headers.get("origin")
+    if origin and _host_of(origin) not in LOCAL_HOSTS:
+        return JSONResponse({"detail": "Cross-site request rejected."}, 403)
+    if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path.startswith("/api/"):
+        if not hmac.compare_digest(request.headers.get("x-ludofabric-token", ""), SESSION_TOKEN):
+            return JSONResponse({"detail": "Missing or invalid session token. Reload the dashboard page."}, 403)
+    return await call_next(request)
 
 
 # ----------------------------------------------------------------------------- settings
@@ -119,6 +168,12 @@ def apply_models(cfg: Config, pid: str, overrides: dict | None = None, model: st
                 (value.strip() if value is not None else values.get(field, "")))
 
 
+def _platform_support(cfg: Config) -> dict:
+    from gameagent.platforms import PLATFORMS, module_installed
+    return {p.id: {"label": p.label, "installed": module_installed(cfg.unity_editor, p.id), "note": p.note}
+            for p in PLATFORMS.values()}
+
+
 @app.get("/api/settings")
 def get_settings():
     cfg = Config()
@@ -129,6 +184,7 @@ def get_settings():
         "codex_reasoning": cfg.codex_reasoning, "polish_rounds": cfg.polish_rounds,
         "models": provider_models(cfg.llm_backend),
         "brief_mode": cfg.brief_mode, "max_llm_calls": cfg.max_llm_calls, "max_job_seconds": cfg.max_job_seconds,
+        "platform_support": _platform_support(cfg),
         "unity_candidates": sorted(glob.glob(r"C:\Program Files\Unity\Hub\Editor\*\Editor\Unity.exe")
                                    + glob.glob(r"C:\Program Files\Unity*\Editor\Unity.exe"), reverse=True),
     }
@@ -250,10 +306,12 @@ def test(pid: str, body: ModelTest | None = None):
 
 # ----------------------------------------------------------------------------- jobs
 class JobRequest(BaseModel):
+    source_project: str | None = None
     request: str | None = None
     project: str | None = None
     provider: str = "codex"
-    mode: str = "design"  # design | build
+    mode: Literal["design", "build", "change"] = "design"
+    targets: list[str] | None = None  # windows | android | ios | macos | linux | webgl
     model: str | None = None
     model_orchestrator: str | None = None
     model_coder: str | None = None
@@ -282,6 +340,7 @@ class JobRunner:
 
     def start(self, job: JobRequest, project_path: Path) -> None:
         cfg = Config()
+        cfg.llm_backend = job.provider
         apply_models(cfg, job.provider, job.model_dump(), job.model)
         # Resolve configuration now so settings changed during execution cannot alter this job.
         for field in MODEL_FIELDS:
@@ -293,27 +352,36 @@ class JobRunner:
         self.status["models"] = {field: getattr(job, field) for field in MODEL_FIELDS}
         self.status["provider_binary"] = cfg.codex_bin if job.provider == "codex" else ""
         self.persist()
-        self.thread = threading.Thread(target=self._run, args=(job, project_path), daemon=True)
+        self.thread = threading.Thread(target=self._run, args=(job.model_copy(deep=True), project_path, cfg), daemon=True)
         self.thread.start()
 
-    def _run(self, job: JobRequest, project_path: Path) -> None:
-        from gameagent.orchestrator import Orchestrator
+    def _run(self, job: JobRequest, project_path: Path, cfg: Config | None = None) -> None:
+        from gameagent.graph import run_project
         try:
-            cfg = Config()
-            cfg.llm_backend = job.provider
-            apply_models(cfg, job.provider, job.model_dump(), job.model)
+            if cfg is None:
+                cfg = Config()
+                cfg.llm_backend = job.provider
+                apply_models(cfg, job.provider, job.model_dump(), job.model)
             cfg.validate(need_unity=(job.mode == "build"))
-            orch = Orchestrator(cfg, project_path)
-            orch.run(job.request, stop_after="planned" if job.mode == "design" else None)
+            if job.mode == "change":
+                from gameagent.change import run_change
+                rec = run_change(cfg, project_path, job.request, job.targets)
+                self.status["change"] = {k: rec.get(k) for k in ("id", "status", "summary")}
+            else:
+                run_project(cfg, project_path, job.request, stop_after="planned" if job.mode == "design" else None,
+                            targets=job.targets, source=job.source_project)
             self.status["state"] = "completed"
         except BaseException as exc:  # includes SystemExit from validation / fatal LLM errors
-            from gameagent.llm import UsageLimitReached, BudgetReached
+            from gameagent.llm import UsageLimitReached, BudgetReached, JobCancelled
+            from gameagent.graph import WorkflowStopped
             msg = str(exc) or exc.__class__.__name__
-            if not isinstance(exc, SystemExit):
+            if not isinstance(exc, (SystemExit, WorkflowStopped)):
                 msg += "\n" + traceback.format_exc()[-2000:]
             self.status["error"] = msg
             self.status["state"] = "waiting_for_limit" if isinstance(exc, UsageLimitReached) else "failed"
             if isinstance(exc, BudgetReached): self.status["state"] = "budget_paused"
+            if isinstance(exc, JobCancelled): self.status["state"] = "cancelled"
+            if isinstance(exc, WorkflowStopped): self.status["state"] = exc.outcome
             if isinstance(exc, UsageLimitReached):
                 self.status["retry_at"] = exc.retry_at
             console.print(f"JOB FAILED: {msg}")
@@ -347,12 +415,31 @@ def _start_job(job: JobRequest):
         raise HTTPException(409, "A job is already running (Unity allows one build at a time).")
     if job.provider not in PROVIDERS and job.provider not in ("openai", "chat"):
         raise HTTPException(400, "unknown provider")
+    if job.targets is not None:
+        from gameagent.platforms import normalize
+        try:
+            job.targets = normalize(job.targets)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
     name = re.sub(r"[^A-Za-z0-9_-]", "", job.project or "") or slugify(job.request or "")
     path = project_path(name)
+    from gameagent.revision import source_from_request, validate_source
+    try:
+        if job.mode == "change" and job.source_project:
+            raise ValueError("For a change request select the existing project. Use design/build with Source project to make an isolated revision copy.")
+        source = job.source_project or (source_from_request(job.request) if job.request and job.mode != "change" else None)
+        if source:
+            validate_source(Path(source), path)
+            job.source_project = source
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     state = state_path(path)
-    if not job.request and not state.exists():
+    if job.mode == "change":
+        if not job.request or not state.exists():
+            raise HTTPException(400, "Select a project and describe the change.")
+    elif not job.request and not state.exists():
         raise HTTPException(400, "Describe your game first.")
-    if job.request and state.exists():
+    if job.mode != "change" and job.request and state.exists():
         saved = json.loads(state.read_text(encoding="utf-8"))
         if saved.get("request") and saved["request"] != job.request:
             raise HTTPException(409, "This project has a different saved request. Use Resume or choose a new project name.")
@@ -383,28 +470,84 @@ def import_project(body: ImportProject):
     if not path.is_absolute():
         raise HTTPException(400, "Enter the full Unity project folder path.")
     path = path.resolve()
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", path.name):
-        raise HTTPException(400, "Project folder names currently support letters, numbers, hyphens and underscores.")
-    if not state_path(path).exists():
-        raise HTTPException(400, "No LudoFabric checkpoint found. Keep the adjacent <Project>.agent folder with the project. "
-                            "An arbitrary Unity project cannot be resumed without its saved plan.")
+    from gameagent.change import is_unity_project, profile_project
     from gameagent.state import State
+    if not state_path(path).exists():
+        if not is_unity_project(path):
+            raise HTTPException(400, "Not a Unity project: the folder needs Assets/ and ProjectSettings/.")
+        # Existing project made elsewhere: create a checkpoint next to it; the project itself is not modified.
+        State(origin="external", profile=profile_project(path)).save(state_path(path))
     try:
         State.load(state_path(path))
     except (ValueError, OSError) as exc:
         raise HTTPException(400, f"Checkpoint cannot be read: {exc}")
+    alias = re.sub(r"[^A-Za-z0-9_-]+", "_", path.name).strip("_") or "UnityProject"
     known = registered_projects()
-    existing = Path(known.get(path.name) or projects_root() / path.name).resolve()
-    if existing != path and (state_path(existing).exists() or path.name in known):
+    existing = Path(known.get(alias) or projects_root() / alias).resolve()
+    if existing != path and (state_path(existing).exists() or alias in known):
         raise HTTPException(409, "Another project with this name is already registered.")
-    known[path.name] = str(path)
+    known[alias] = str(path)
     atomic_json(STUDIO_DIR / "projects.json", known)
-    return {"ok": True, "project": path.name, "path": str(path)}
+    remember_project(alias, path)
+    return {"ok": True, "project": alias, "path": str(path)}
+
+
+@app.post('/api/projects/{name}/open')
+def open_recent_project(name: str):
+    if runner.busy():
+        raise HTTPException(409, 'Wait for the current job before switching projects.')
+    path = project_path(name).resolve()
+    if not path.is_dir() or not state_path(path).is_file():
+        raise HTTPException(404, 'Project folder or checkpoint is missing. Open its new path to register it again.')
+    remember_project(name, path)
+    return {'ok': True, 'project': name, 'path': str(path)}
+
+
+@app.post("/api/projects/{name}/changes/{change_id}/rollback")
+def rollback_change(name: str, change_id: str):
+    if runner.busy():
+        raise HTTPException(409, "Wait for the current job to finish.")
+    if not re.fullmatch(r"c\d{3}", change_id):
+        raise HTTPException(400, "bad change id")
+    from gameagent.change import rollback
+    from gameagent.orchestrator import Orchestrator
+    try:
+        rec = rollback(Orchestrator(Config(), project_path(name)), change_id)
+    except SystemExit as exc:
+        raise HTTPException(409, str(exc))
+    return {"ok": True, "change": rec}
 
 
 @app.get("/api/jobs/current")
 def current_job():
     return {**runner.status, "running": runner.busy()}
+
+
+@app.post("/api/jobs/cancel")
+def cancel_job():
+    """Cooperative: stops before the next AI request; the current Unity/model step finishes and is saved."""
+    path = runner.status.get("project_path")
+    if not runner.busy() or not path:
+        raise HTTPException(409, "No running job.")
+    flag = state_path(Path(path)).parent / "CANCEL"
+    flag.write_text(str(time.time()), encoding="utf-8")
+    return {"ok": True, "message": "Cancellation requested; the job stops before its next AI request."}
+
+
+@app.post("/api/jobs/dismiss")
+def dismiss_job_notice():
+    if runner.busy():
+        raise HTTPException(409, "A running job cannot be dismissed.")
+    runner.status["notice_dismissed"] = True
+    # This is a dashboard preference. Preserve the project's error/checkpoint history.
+    atomic_json(STUDIO_DIR / "job.json", runner.status)
+    return {"ok": True}
+
+
+@app.get("/api/projects/{name}/events")
+def project_events(name: str, limit: int = 200):
+    from gameagent.metrics import load_events
+    return load_events(_agent_dir(name) / "events.jsonl")[-max(1, min(limit, 1000)):]
 
 
 @app.get("/api/events")
@@ -432,6 +575,8 @@ def _agent_dir(name: str) -> Path:
 @app.get("/api/projects")
 def list_projects():
     out = []
+    opened = {os.path.normcase(p['path']): p['opened'] for p in recent_projects()}
+    names = {state_path(Path(p)).parent.resolve(): alias for alias, p in registered_projects().items()}
     dirs = set(projects_root().glob("*.agent"))
     dirs.update(state_path(Path(p)).parent for p in registered_projects().values())
     for d in sorted((p for p in dirs if p.exists()), key=lambda p: p.stat().st_mtime, reverse=True):
@@ -442,9 +587,16 @@ def list_projects():
             s = json.loads(st.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
-        out.append({"name": d.name[:-6], "phase": s.get("phase"), "request": s.get("request", ""),
+        name = names.get(d.resolve(), d.name[:-6])
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            continue
+        path = project_path(name).resolve()
+        out.append({"name": name, "phase": s.get("phase"), "request": s.get("request", ""),
+                    "path": str(path), "available": path.is_dir(),
+                    "last_opened": opened.get(os.path.normcase(str(path)), 0),
+                    "origin": s.get("origin", "ludofabric"), "changes": len(s.get("changes", [])),
                     "title": (s.get("design") or {}).get("title"), "modified": d.stat().st_mtime})
-    return out
+    return sorted(out, key=lambda p: (p['last_opened'], p['modified']), reverse=True)
 
 
 @app.get("/api/projects/{name}")
@@ -508,5 +660,7 @@ def project_doc(name: str, doc_id: str, download: bool = False):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return (STATIC / "studio.html").read_text(encoding="utf-8")
+    html = (STATIC / "studio.html").read_text(encoding="utf-8")
+    html = html.replace("<head>", f'<head>\n<meta name="lf-token" content="{SESSION_TOKEN}">', 1)
+    return HTMLResponse(html, headers={'Cache-Control': 'no-store'})
 

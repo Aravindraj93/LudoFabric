@@ -28,6 +28,28 @@ class EfficiencyTests(unittest.TestCase):
         self.root=Path(self.tmp.name); self.cfg=Config()
         self.project=UnityProject(self.cfg,self.root/'Game',self.root/'state')
 
+    def test_revision_request_stops_before_model_or_unity_calls(self):
+        orch=Orchestrator(self.cfg,self.root/'Game')
+        orch._design=Mock(); orch.project.ensure_created=Mock()
+        with self.assertRaisesRegex(ValueError,'Not a Unity project'):
+            orch.run('Improve the existing Coin Dash project at C:/UnityProjects/Coins')
+        orch._design.assert_not_called()
+        orch.project.ensure_created.assert_not_called()
+        self.assertFalse(orch.state_file.exists())
+
+    def test_empty_specialist_output_reports_actual_blocker(self):
+        task=TaskSpec(id='T01',role='level',title='Inspect',description='Inspect existing files')
+        with self.assertRaisesRegex(RuntimeError,'T01.*filesystem inspection unavailable'):
+            Orchestrator._require_task_output(task,AgentOutput(notes='filesystem inspection unavailable'))
+
+    def test_failed_prerequisite_is_named(self):
+        orch=Orchestrator(self.cfg,self.root/'Game')
+        orch.state.plan=Plan(architecture=Architecture(root_namespace='Game',overview='Game',systems=[]),assets=[],tasks=[
+            TaskSpec(id='T01',role='level',title='Inspect',description='Inspect',status='failed'),
+            TaskSpec(id='T02',role='graphics',title='Polish',description='Polish',depends_on=['T01'])])
+        with self.assertRaisesRegex(RuntimeError,'failed prerequisites: T01'):
+            orch._ready_tasks()
+
     def test_old_designs_remain_compatible(self):
         self.assertEqual(design().scope,"vertical_slice")
         self.assertEqual(design().progression,[])

@@ -23,10 +23,13 @@ def main() -> None:
 
     r = sub.add_parser("run", help="build a game from a request")
     r.add_argument("request")
+    r.add_argument("--source", help="Existing Unity project to revise in a separate --project destination")
     r.add_argument("--project", required=True, type=Path, help="Unity project folder (created if missing)")
+    r.add_argument("--platforms", default=None, help="windows,android,ios,macos,linux,webgl or all (default windows)")
 
     rs = sub.add_parser("resume", help="continue an interrupted run")
     rs.add_argument("--project", required=True, type=Path)
+    rs.add_argument("--platforms", default=None, help="change/add build platforms; adding one to a shipped game rebuilds only")
 
     d = sub.add_parser("design", help="dry run: intent -> design -> plan (no Unity)")
     d.add_argument("request")
@@ -40,8 +43,29 @@ def main() -> None:
     w.add_argument("--port", type=int, default=8765)
     w.add_argument("--no-browser", action="store_true")
 
+    c = sub.add_parser("change", help="upgrade/modify a finished LudoFabric game or ANY existing Unity project")
+    c.add_argument("request")
+    c.add_argument("--project", required=True, type=Path, help="Unity project folder (Assets/ + ProjectSettings/)")
+    c.add_argument("--platforms", default=None)
+
+    rb = sub.add_parser("rollback", help="undo a change made with 'change'")
+    rb.add_argument("--project", required=True, type=Path)
+    rb.add_argument("--change", required=True, help="change id, e.g. c001")
+
     args = ap.parse_args()
     cfg = Config()
+
+    if args.cmd == "change":
+        cfg.validate(need_unity=False)  # without Unity the change is applied but reported as unverified
+        from gameagent.change import run_change
+        run_change(cfg, args.project, args.request, args.platforms)
+        return
+    if args.cmd == "rollback":
+        from gameagent.change import rollback
+        from gameagent.orchestrator import Orchestrator
+        rec = rollback(Orchestrator(cfg, args.project), args.change)
+        console.print(f"[green]Change {rec['id']} rolled back.[/]")
+        return
 
     if args.cmd == "web":
         import threading
@@ -57,8 +81,8 @@ def main() -> None:
 
     if args.cmd in ("run", "resume"):
         cfg.validate(need_unity=True)
-        from gameagent.orchestrator import Orchestrator
-        Orchestrator(cfg, args.project).run(getattr(args, "request", None))
+        from gameagent.graph import run_project
+        run_project(cfg, args.project, getattr(args, "request", None), targets=args.platforms, source=getattr(args, "source", None))
 
     elif args.cmd == "design":
         cfg.validate(need_unity=False)

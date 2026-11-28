@@ -13,6 +13,23 @@ from ..ui import console
 from ..metrics import record
 
 CS_ERROR = re.compile(r"^(?P<file>[^\s(][^\r\n(]*\.cs)\((?P<line>\d+),(?P<col>\d+)\): error (?P<code>CS\d+): (?P<msg>.*)$", re.M)
+MAX_CAPTURE_BYTES = 16 * 1024 * 1024
+
+
+def read_log(path: Path) -> tuple[str, bool]:
+    """Keep full logs on disk but bound memory use; truncated evidence cannot pass QA."""
+    if not path.exists():
+        return '', False
+    with path.open('rb') as stream:
+        size = path.stat().st_size
+        if size <= MAX_CAPTURE_BYTES:
+            return stream.read(MAX_CAPTURE_BYTES).decode('utf-8', errors='replace'), False
+        head = stream.read(MAX_CAPTURE_BYTES // 4)
+        stream.seek(-MAX_CAPTURE_BYTES * 3 // 4, 2)
+        tail = stream.read(MAX_CAPTURE_BYTES * 3 // 4)
+    return (head.decode('utf-8', errors='replace') +
+            '\n[Unity log capture truncated; full log retained on disk.]\n' +
+            tail.decode('utf-8', errors='replace')), True
 
 
 @dataclass
@@ -21,10 +38,11 @@ class UnityResult:
     log: str
     compile_errors: list[dict] = field(default_factory=list)
     bridge: dict | None = None
+    log_truncated: bool = False
 
     @property
     def ok(self) -> bool:
-        if self.returncode != 0 or self.compile_errors:
+        if self.returncode != 0 or self.compile_errors or self.log_truncated:
             return False
         if self.bridge is not None:
             return bool(self.bridge.get("ok"))
@@ -32,6 +50,8 @@ class UnityResult:
 
     def error_text(self, limit: int = 12000) -> str:
         parts = []
+        if self.log_truncated:
+            parts.append('Unity log exceeded the capture limit. Verification is incomplete; inspect the full log on disk for repeated errors before retrying.')
         if self.compile_errors:
             parts.append("COMPILER ERRORS:\n" + "\n".join(
                 f"{e['file']}({e['line']},{e['col']}): {e['code']}: {e['msg']}" for e in self.compile_errors))
@@ -84,7 +104,7 @@ class UnityRunner:
             rc = proc.returncode
         except subprocess.TimeoutExpired:
             rc = -1
-        log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+        log, truncated = read_log(log_path)
         errors = self._parse_errors(log)
         bridge = None
         if result_path.exists():
@@ -92,7 +112,7 @@ class UnityRunner:
                 bridge = json.loads(result_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 bridge = None
-        res = UnityResult(rc, log, errors, bridge)
+        res = UnityResult(rc, log, errors, bridge, truncated)
         record(self.logs_dir.parent / "metrics.jsonl", kind="unity", name=name, ok=res.ok,
                seconds=round(time.time() - t0, 3), compile_errors=len(errors))
         console.print(f"[dim]  unity< {name}: rc={rc} ok={res.ok} ({time.time() - t0:.0f}s, "
